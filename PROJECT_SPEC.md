@@ -1,0 +1,13 @@
+### TinySleepNet Exact Layer Specifications (for 100 Hz input, 30s epoch = 3000 samples):
+- **Conv1:** 128 filters, kernel_size = 50 (Fs/2), stride = 6 (Fs/16), padding = 'same' + BatchNorm1d + ReLU
+- **MaxPool1:** kernel_size = 8, stride = 8
+- **Dropout1:** p = 0.5
+- **Conv2:** 128 filters, kernel_size = 8, stride = 1, padding = 'same' + BatchNorm1d + ReLU
+- **Conv3:** 128 filters, kernel_size = 8, stride = 1, padding = 'same' + BatchNorm1d + ReLU
+- **Conv4:** 128 filters, kernel_size = 8, stride = 1, padding = 'same' + BatchNorm1d + ReLU
+- **MaxPool2:** kernel_size = 4, stride = 4
+- **Dropout2:** p = 0.5
+- **Flatten:** Outputs feature vector `f_t` of size 128 * 94 = 12,032 (or 128 * 93 depending on padding)
+- **If `use_context = False` (Model A):** Linear(feat_dim, 5)
+- **If `use_context = True` (Model B):** Unidirectional LSTM(input_size=feat_dim, hidden_size=128, num_layers=1) -> Dropout(0.5) -> Linear(128, 5)
+- **Data Augmentation (from TinySleepNet paper):** Random signal roll/time-shift of up to ±10% of epoch length and random sign flip (multiply signal by -1 with 50% probability) during training.
