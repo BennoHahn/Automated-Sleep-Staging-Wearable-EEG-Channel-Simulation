@@ -1,0 +1,71 @@
+seed: 42
+
+paths:
+  raw_dir: data/raw
+  edf_dir: data/raw/edf
+  annotation_dir: data/raw/annotations-events-profusion
+  processed_dir: data/processed
+  splits_dir: data/splits
+  results_dir: results
+
+dataset:
+  name: shhs          # dataset-agnostic loader; later: bitbrain_boas (ds005555)
+  mains_freq_hz: 60   # SHHS is US-based; use 50 for European datasets
+
+preprocessing:
+  target_fs: 100
+  epoch_sec: 30
+  bandpass:
+    low_hz: 0.2
+    high_hz: 49.0     # use 0.3-40 Hz if the original fs is 100 Hz
+    order: 5
+    zero_phase: true
+  notch:
+    enabled: true
+    freq_hz: null     # null -> dataset.mains_freq_hz
+    q: 30
+  normalization: zscore_per_recording   # zscore_per_recording | none
+  labels:               # AASM 5 classes
+    Wake: 0
+    N1: 1
+    N2: 2
+    N3: 3             # N3 and N4 (R&K) merged
+    REM: 4
+  exclude_unknown_movement: true
+
+cv:
+  n_folds: 10
+  split_ratio: {train: 0.8, val: 0.1, test: 0.1}   # subject-level only
+  split_level: subject
+
+model:
+  name: tinysleepnet
+  use_context: false  # Model A (context-blind); true -> Model B (LSTM)
+  seq_len: 20         # M epochs, used when use_context is true
+  n_classes: 5
+  dropout: 0.5
+  lstm_hidden: 128
+  conv_filters: 128
+  conv1_kernel: 50    # Fs/2
+  conv1_stride: 6     # Fs/16
+  conv_kernel: 8
+  pool1: 8
+  pool2: 4
+
+training:
+  optimizer: adam
+  lr: 1.0e-4
+  weight_decay: 1.0e-3
+  batch_size: 128
+  max_epochs: 200
+  early_stopping_patience: 50
+  monitor: val_macro_f1
+  class_weighted_loss: false
+  device: auto
+  augmentation:
+    enabled: true
+    max_shift_frac: 0.1   # random roll up to +-10% of epoch
+    sign_flip_prob: 0.5
+  dry_run:
+    n_subjects: 2
+    epochs: 2

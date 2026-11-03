@@ -1,0 +1,49 @@
+# ============================================================================
+# Phase 2 Configuration: Simultaneous PSG + Wearable Validation & Transfer Learning
+# See LITERATURE_AND_CHANNEL_SIMULATION_NOTES.md for full details
+# ============================================================================
+
+target_datasets:
+  bitbrain_boas:
+    description: "Bitbrain Open Access Sleep (OpenNeuro ds005555, N=128 nights)"
+    psg_channels: [F3-M2, F4-M2, C3-M2, C4-M2, O1-M2, O2-M2, EOG(L), EOG(R), EMG]
+    wearable_channels:
+      single_af7: [AF7]
+      single_af8: [AF8]
+      bipolar_af7_af8:
+        - {name: AF7-AF8, op: diff, inputs: [AF7, AF8]}
+      midline_avg_af7_af8:
+        - {name: AF_Midline, op: mean, inputs: [AF7, AF8]}
+
+  dreem_dod:
+    description: "Dreem Open Datasets (DOD-H N=25 Healthy, DOD-O N=55 OSA)"
+    psg_channels: [F3_M2, F4_M1, C3_M2, O1_M2, EOG1, EOG2, EMG]
+    wearable_channels:
+      cross_forehead: [F3_F4]
+      fronto_occipital_left: [F3_O1]
+      fronto_occipital_right: [F4_O2]
+
+source_checkpoint: null   # Path to Phase 1 .pt checkpoint with separate feature_extractor / classifier weights
+
+# Four Transfer Learning Strategies (Waters & Clifford 2022; van der Aar 2024/2025; Heremans 2022)
+strategies:
+  direct_transfer:
+    enabled: false
+    description: "Zero-shot evaluation of source-trained model on target wearable without weight updates"
+
+  from_scratch:
+    enabled: false
+    description: "Train TinySleepNet randomly initialized on target wearable data only"
+
+  fine_tuning:
+    enabled: false
+    lr: 1.0e-5
+    modes:
+      - full        # Fine-tune both feature_extractor and classifier (best for N >= 10-20, Waters & Clifford 2022)
+      - head_only   # Freeze feature_extractor, fine-tune classifier only
+
+  feature_matching:
+    enabled: false
+    description: "Align target intermediate feature means to source feature means (best for small N <= 10, Heremans et al. 2022)"
+    lambda_1: 1.0     # Weight for MSE(f_target_mean, f_source_mean)
+    lambda_2: 1.0e-3  # Weight for L2 distance ||W_feat - W_feat_init||_2^2

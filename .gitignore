@@ -1,0 +1,22 @@
+# Virtual environments (recreated automatically by Step 0 via requirements.txt)
+.venv/
+venv/
+env/
+
+# Python cache & temporary directories
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ipynb_checkpoints/
+.mplconfig/
+
+# Derived preprocessed NPZ cache (>50 MB per file; regenerated automatically in ~8s by Step 1 from data/raw/)
+data/processed/*.npz
+
+# Temporary dry-run test output (keep real training in results/notebook_ctx_false/ and results/notebook_ctx_true/)
+results/dry_run/
+
+# OS metadata
+.DS_Store
+Thumbs.db

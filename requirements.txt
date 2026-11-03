@@ -1,0 +1,24 @@
+# EDF / EEG
+mne>=1.6
+pyedflib>=0.1.36
+
+# PDF reading (for searching /papers)
+pypdf>=4.0
+pymupdf>=1.24
+
+# Deep learning & scientific stack
+torch>=2.2
+torch-directml==0.2.5.dev240914; sys_platform == 'win32'
+numpy>=1.26
+scipy>=1.11
+scikit-learn>=1.4
+pandas>=2.1
+h5py>=3.10
+
+# Plotting
+matplotlib>=3.8
+seaborn>=0.13
+
+# Utilities
+pyyaml>=6.0
+tqdm>=4.66

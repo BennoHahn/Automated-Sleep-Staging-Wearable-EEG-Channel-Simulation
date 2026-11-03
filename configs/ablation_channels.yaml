@@ -1,0 +1,165 @@
+# ============================================================================
+# Channel Ablation & Wearable Simulation Configurations
+# See LITERATURE_AND_CHANNEL_SIMULATION_NOTES.md for full literature citations
+# ============================================================================
+
+# Canonical internal channel names stored by preprocessing.py for SHHS1:
+#   C4-A1   (from EDF 'EEG', 125 Hz -> 100 Hz)
+#   C3-A2   (from EDF 'EEG(sec)', 125 Hz -> 100 Hz)
+#   EOG(L)  (from EDF 'EOG(L)', 50 Hz -> 100 Hz)
+#   EOG(R)  (from EDF 'EOG(R)', 50 Hz -> 100 Hz)
+#   EMG     (from EDF 'EMG', 125 Hz -> 100 Hz)
+#
+# When 10-20 PSG datasets (e.g., BOAS ds005555 or Dreem DOD) are loaded,
+# additional canonical channels are available:
+#   F3-M2, F4-M1, F4-M2, O1-M2, O2-M1, AF7, AF8
+
+shhs_configs:
+  # --------------------------------------------------------------------------
+  # Category A: Clinical Multi-Channel PSG Baselines (Upper Bound)
+  # --------------------------------------------------------------------------
+  full_psg:
+    category: clinical_baseline
+    mastoid: true
+    description: "5-ch Full PSG baseline (C4-A1, C3-A2, EOG(L), EOG(R), EMG)"
+    channels:
+      - {name: C4-A1, op: identity, inputs: [C4-A1]}
+      - {name: C3-A2, op: identity, inputs: [C3-A2]}
+      - {name: EOG(L), op: identity, inputs: [EOG(L)]}
+      - {name: EOG(R), op: identity, inputs: [EOG(R)]}
+      - {name: EMG, op: identity, inputs: [EMG]}
+
+  eeg_eog:
+    category: clinical_baseline
+    mastoid: true
+    description: "4-ch EEG + EOG without chin EMG (C4-A1, C3-A2, EOG(L), EOG(R))"
+    channels:
+      - {name: C4-A1, op: identity, inputs: [C4-A1]}
+      - {name: C3-A2, op: identity, inputs: [C3-A2]}
+      - {name: EOG(L), op: identity, inputs: [EOG(L)]}
+      - {name: EOG(R), op: identity, inputs: [EOG(R)]}
+
+  dual_eeg:
+    category: clinical_baseline
+    mastoid: true
+    description: "2-ch Bilateral Central EEG (C4-A1, C3-A2)"
+    channels:
+      - {name: C4-A1, op: identity, inputs: [C4-A1]}
+      - {name: C3-A2, op: identity, inputs: [C3-A2]}
+
+  # --------------------------------------------------------------------------
+  # Category B: Option 1 - Location-Close Single/Dual PSG Sensors
+  # --------------------------------------------------------------------------
+  single_eeg_c4:
+    category: location_proxy
+    mastoid: true
+    description: "1-ch Central EEG C4-A1 (Standard SHHS single-lead PSG, He et al. 2023)"
+    channels:
+      - {name: C4-A1, op: identity, inputs: [C4-A1]}
+
+  single_eeg_c3:
+    category: location_proxy
+    mastoid: true
+    description: "1-ch Central EEG C3-A2 (Waters & Clifford 2022 SHHS source channel)"
+    channels:
+      - {name: C3-A2, op: identity, inputs: [C3-A2]}
+
+  single_eog_l:
+    category: location_proxy
+    mastoid: true
+    description: "1-ch Left EOG (Eye-mask/temple/forehead wearable proxy near AF7/Fp1, Heremans et al. 2022)"
+    channels:
+      - {name: EOG(L), op: identity, inputs: [EOG(L)]}
+
+  dual_eog:
+    category: location_proxy
+    mastoid: true
+    description: "2-ch Bilateral EOG (Two-channel forehead/eye-mask proxy, Huang et al. 2014)"
+    channels:
+      - {name: EOG(L), op: identity, inputs: [EOG(L)]}
+      - {name: EOG(R), op: identity, inputs: [EOG(R)]}
+
+  # --------------------------------------------------------------------------
+  # Category C: Option 2 - Mathematically Simulated Wearable Derivations (SHHS)
+  # --------------------------------------------------------------------------
+  sim_bipolar_eog:
+    category: math_simulation
+    mastoid: false
+    description: "1-ch Simulated cross-forehead/temple bipolar strip: EOG(L) - EOG(R) (No mastoid, simulates AF7-AF8 / Fp1-Fp2, Heremans 2022 & van der Aar 2024)"
+    channels:
+      - {name: Sim_EOG_Bipolar, op: diff, inputs: [EOG(L), EOG(R)]}
+
+  sim_avg_eog:
+    category: math_simulation
+    mastoid: true
+    description: "1-ch Simulated midline forehead/periorbital sensor: (EOG(L) + EOG(R)) / 2 (With mastoid, simulates Fpz-M2, Heremans 2022 MASS-EOG & van der Aar 2025)"
+    channels:
+      - {name: Sim_EOG_Avg, op: mean, inputs: [EOG(L), EOG(R)]}
+
+  sim_bipolar_eeg:
+    category: math_simulation
+    mastoid: false
+    description: "1-ch Simulated cross-hemisphere bipolar EEG: (C3-A2) - (C4-A1) (Tests bilateral slow-wave cancellation, van der Aar 2024)"
+    channels:
+      - {name: Sim_EEG_Bipolar, op: diff, inputs: [C3-A2, C4-A1]}
+
+  sim_avg_eeg:
+    category: math_simulation
+    mastoid: true
+    description: "1-ch Simulated midline central EEG: ((C3-A2) + (C4-A1)) / 2 (Tests bilateral averaging, van der Aar 2025)"
+    channels:
+      - {name: Sim_EEG_Avg, op: mean, inputs: [C3-A2, C4-A1]}
+
+  sim_eeg_minus_eog:
+    category: math_simulation
+    mastoid: false
+    description: "1-ch Simulated fronto-central EEG-EOG differential: (C4-A1) - EOG(L) (Supratak et al. 2017/2020 montage re-referencing)"
+    channels:
+      - {name: Sim_C4_EOG, op: diff, inputs: [C4-A1, EOG(L)]}
+
+# ============================================================================
+# Full 10-20 PSG Wearable Simulation Recipes (for BOAS ds005555 & Dreem DOD)
+# Directly implements every row of the Master Table in LITERATURE_AND_CHANNEL_SIMULATION_NOTES.md
+# ============================================================================
+full_10_20_configs:
+  psg_f3_m2:
+    category: location_proxy
+    mastoid: true
+    description: "Row 1: Simulated AF7-M2 / Fp1-M2 using F3-M2 (Waters & Clifford 2022; van der Aar et al. 2024)"
+    channels:
+      - {name: F3-M2, op: identity, inputs: [F3-M2]}
+
+  sim_fz_m2:
+    category: math_simulation
+    mastoid: true
+    description: "Row 2: Simulated Fpz-M2 using Fz-M2 = (F3-M2 + F4-M2) / 2 (van der Aar et al. 2025)"
+    channels:
+      - {name: Sim_Fz_M2, op: mean, inputs: [F3-M2, F4-M2]}
+
+  sim_f3_f4:
+    category: math_simulation
+    mastoid: false
+    description: "Row 3 & 6: Simulated cross-forehead Fp1-Fp2 / AF7-AF8 using F3-F4 = (F3-M2) - (F4-M2) (van der Aar et al. 2024; Dreem 2021)"
+    channels:
+      - {name: Sim_F3_F4, op: diff, inputs: [F3-M2, F4-M2]}
+
+  sim_eyemask_eog:
+    category: location_proxy
+    mastoid: true
+    description: "Row 4: Simulated eye-mask wearable AF7-AF8 using EOG-L (Heremans et al. 2022)"
+    channels:
+      - {name: EOG(L), op: identity, inputs: [EOG(L)]}
+
+  sim_f3_o1:
+    category: math_simulation
+    mastoid: false
+    description: "Row 5: Simulated fronto-occipital headband Fp1-O1 / F3-O1 = (F3-M2) - (O1-M2) (Dreem, Guillot & Thorey 2021)"
+    channels:
+      - {name: Sim_F3_O1, op: diff, inputs: [F3-M2, O1-M2]}
+
+  sim_f4_o2:
+    category: math_simulation
+    mastoid: false
+    description: "Row 5b: Simulated fronto-occipital headband Fp2-O2 / F4-O2 = (F4-M1) - (O2-M1) (Dreem, Guillot & Thorey 2021)"
+    channels:
+      - {name: Sim_F4_O2, op: diff, inputs: [F4-M1, O2-M1]}
