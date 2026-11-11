@@ -222,35 +222,73 @@ def predict_subject_hypnogram(
     if n_epochs == 0:
         return y_true, np.array([], dtype=np.int64)
 
+    is_cuda = device.type == "cuda"
+    use_amp = is_cuda and hasattr(torch, "amp")
+    amp_dtype = (
+        torch.bfloat16
+        if (is_cuda and hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported())
+        else torch.float16
+    )
+
     preds_list: list[np.ndarray] = []
     with torch.no_grad():
         if not model.use_context:
             for start in range(0, n_epochs, batch_size):
                 end = min(start + batch_size, n_epochs)
-                bx = torch.from_numpy(x_np[start:end]).to(device)
-                logits = model(bx)  # (B, n_classes)
+                bx = torch.from_numpy(x_np[start:end]).to(device, dtype=torch.float32, non_blocking=is_cuda)
+                if use_amp:
+                    with torch.amp.autocast("cuda", dtype=amp_dtype):
+                        logits = model(bx)
+                else:
+                    logits = model(bx)  # (B, n_classes)
                 preds_list.append(logits.argmax(dim=-1).cpu().numpy())
             y_pred = np.concatenate(preds_list, axis=0)
         else:
-            start = 0
-            while start + seq_len <= n_epochs:
-                seq_x = torch.from_numpy(x_np[start : start + seq_len]).unsqueeze(0).to(device)
-                logits = model(seq_x)  # (1, seq_len, n_classes)
-                preds_list.append(logits.squeeze(0).argmax(dim=-1).cpu().numpy())
-                start += seq_len
+            # Batch all full `seq_len` windows together so a whole night (~50 windows) runs in 1-2 GPU calls
+            n_full_windows = n_epochs // seq_len
+            if n_full_windows > 0:
+                n_full_ep = n_full_windows * seq_len
+                windows_np = x_np[:n_full_ep].reshape(
+                    n_full_windows, seq_len, x_np.shape[1], x_np.shape[2]
+                )
+                for w_start in range(0, n_full_windows, batch_size):
+                    w_end = min(w_start + batch_size, n_full_windows)
+                    bx = torch.from_numpy(windows_np[w_start:w_end]).to(
+                        device, dtype=torch.float32, non_blocking=is_cuda
+                    )
+                    if use_amp:
+                        with torch.amp.autocast("cuda", dtype=amp_dtype):
+                            logits = model(bx)  # (W, seq_len, n_classes)
+                    else:
+                        logits = model(bx)
+                    preds_list.append(logits.argmax(dim=-1).reshape(-1).cpu().numpy())
+
+            start = n_full_windows * seq_len
             if start < n_epochs:
                 rem = n_epochs - start
                 if n_epochs >= seq_len:
                     tail_x = (
                         torch.from_numpy(x_np[n_epochs - seq_len : n_epochs])
                         .unsqueeze(0)
-                        .to(device)
+                        .to(device, dtype=torch.float32, non_blocking=is_cuda)
                     )
-                    logits = model(tail_x).squeeze(0)
+                    if use_amp:
+                        with torch.amp.autocast("cuda", dtype=amp_dtype):
+                            logits = model(tail_x).squeeze(0)
+                    else:
+                        logits = model(tail_x).squeeze(0)
                     preds_list.append(logits[-rem:].argmax(dim=-1).cpu().numpy())
                 else:
-                    tail_x = torch.from_numpy(x_np[start:n_epochs]).unsqueeze(0).to(device)
-                    logits = model(tail_x).squeeze(0)
+                    tail_x = (
+                        torch.from_numpy(x_np[start:n_epochs])
+                        .unsqueeze(0)
+                        .to(device, dtype=torch.float32, non_blocking=is_cuda)
+                    )
+                    if use_amp:
+                        with torch.amp.autocast("cuda", dtype=amp_dtype):
+                            logits = model(tail_x).squeeze(0)
+                    else:
+                        logits = model(tail_x).squeeze(0)
                     preds_list.append(logits.argmax(dim=-1).cpu().numpy())
             y_pred = np.concatenate(preds_list, axis=0)
 
@@ -667,6 +705,7 @@ def train_one_fold(
         seq_len=seq_len,
         is_train=True,
         augmentation_cfg=train_cfg.get("augmentation", {}),
+        defer_augmentation_to_batch=True,
     )
     n_channels = train_ds.n_channels
     channel_names = list(train_ds.channel_names)
@@ -688,6 +727,25 @@ def train_one_fold(
     is_cuda = device.type == "cuda"
     if is_cuda:
         torch.backends.cudnn.benchmark = True
+        if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul"):
+            torch.backends.cuda.matmul.allow_tf32 = True
+        if hasattr(torch.backends, "cudnn") and hasattr(torch.backends.cudnn, "allow_tf32"):
+            torch.backends.cudnn.allow_tf32 = True
+        if hasattr(torch, "set_float32_matmul_precision"):
+            torch.set_float32_matmul_precision("high")
+
+    use_amp = is_cuda and bool(train_cfg.get("use_amp", True)) and hasattr(torch, "amp")
+    amp_dtype = (
+        torch.bfloat16
+        if (is_cuda and hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported())
+        else torch.float16
+    )
+    scaler = (
+        torch.amp.GradScaler("cuda", enabled=(use_amp and amp_dtype == torch.float16))
+        if is_cuda and hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler")
+        else None
+    )
+
     criterion = nn.CrossEntropyLoss(weight=class_weights)
     if is_dml:
         optimizer: torch.optim.Optimizer = DirectMLAdam(
@@ -748,10 +806,9 @@ def train_one_fold(
             perm = torch.randperm(n_train_items)
             for start_idx in range(0, n_train_items, batch_size):
                 batch_idx = perm[start_idx : start_idx + batch_size]
-                bx = x_train_all[batch_idx]
-                by = y_train_all[batch_idx]
+                bx = x_train_all[batch_idx].to(device, dtype=torch.float32, non_blocking=is_cuda)
+                by = y_train_all[batch_idx].to(device, non_blocking=is_cuda)
 
-                # Fast vectorized batch augmentation on CPU before a single contiguous GPU transfer
                 if aug_enabled:
                     if max_shift_samples > 0:
                         shift = int(np.random.randint(-max_shift_samples, max_shift_samples + 1))
@@ -759,42 +816,90 @@ def train_one_fold(
                             bx = torch.roll(bx, shifts=shift, dims=-1)
                     if sign_flip_prob > 0:
                         signs = torch.where(
-                            torch.rand((bx.shape[0], 1, 1)) < sign_flip_prob, -1.0, 1.0
+                            torch.rand((bx.shape[0], 1, 1), device=device) < sign_flip_prob,
+                            -1.0,
+                            1.0,
                         )
                         bx = bx * signs
 
-                bx = bx.to(device, non_blocking=is_cuda)
-                by = by.to(device, non_blocking=is_cuda)
-                optimizer.zero_grad()
-                logits = model(bx)
-                loss = criterion(logits, by)
-                loss.backward()
-                if grad_clip > 0:
-                    _clip_grad_norm_dml_safe(
-                        model.parameters(),
-                        max_norm=grad_clip,
-                        is_dml=is_dml,
-                    )
-                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                if use_amp:
+                    with torch.amp.autocast("cuda", dtype=amp_dtype):
+                        logits = model(bx)
+                        loss = criterion(logits, by)
+                else:
+                    logits = model(bx)
+                    loss = criterion(logits, by)
+
+                if scaler is not None and scaler.is_enabled():
+                    scaler.scale(loss).backward()
+                    if grad_clip > 0:
+                        scaler.unscale_(optimizer)
+                        nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    if grad_clip > 0:
+                        _clip_grad_norm_dml_safe(
+                            model.parameters(),
+                            max_norm=grad_clip,
+                            is_dml=is_dml,
+                        )
+                    optimizer.step()
                 running_loss += float(loss.item())
                 n_batches += 1
         else:
             train_ds.on_epoch_start()
             assert train_loader is not None
             for bx, by in train_loader:
-                bx = bx.to(device, non_blocking=is_cuda)
+                bx = bx.to(device, dtype=torch.float32, non_blocking=is_cuda)
                 by = by.to(device, non_blocking=is_cuda)
-                optimizer.zero_grad()
-                logits = model(bx)
-                loss = criterion(logits.reshape(-1, model.n_classes), by.reshape(-1))
-                loss.backward()
-                if grad_clip > 0:
-                    _clip_grad_norm_dml_safe(
-                        model.parameters(),
-                        max_norm=grad_clip,
-                        is_dml=is_dml,
-                    )
-                optimizer.step()
+
+                # Fast vectorized GPU batch augmentation across (B, seq_len, C, 3000) or (B, C, 3000)
+                if aug_enabled:
+                    if max_shift_samples > 0:
+                        shift = int(np.random.randint(-max_shift_samples, max_shift_samples + 1))
+                        if shift != 0:
+                            bx = torch.roll(bx, shifts=shift, dims=-1)
+                    if sign_flip_prob > 0:
+                        sign_shape = (
+                            (bx.shape[0], bx.shape[1], 1, 1)
+                            if bx.ndim == 4
+                            else (bx.shape[0], 1, 1)
+                        )
+                        signs = torch.where(
+                            torch.rand(sign_shape, device=device) < sign_flip_prob,
+                            -1.0,
+                            1.0,
+                        )
+                        bx = bx * signs
+
+                optimizer.zero_grad(set_to_none=True)
+                if use_amp:
+                    with torch.amp.autocast("cuda", dtype=amp_dtype):
+                        logits = model(bx)
+                        loss = criterion(logits.reshape(-1, model.n_classes), by.reshape(-1))
+                else:
+                    logits = model(bx)
+                    loss = criterion(logits.reshape(-1, model.n_classes), by.reshape(-1))
+
+                if scaler is not None and scaler.is_enabled():
+                    scaler.scale(loss).backward()
+                    if grad_clip > 0:
+                        scaler.unscale_(optimizer)
+                        nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    if grad_clip > 0:
+                        _clip_grad_norm_dml_safe(
+                            model.parameters(),
+                            max_norm=grad_clip,
+                            is_dml=is_dml,
+                        )
+                    optimizer.step()
                 running_loss += float(loss.item())
                 n_batches += 1
 

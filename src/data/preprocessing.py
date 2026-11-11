@@ -22,6 +22,7 @@ from math import gcd
 import os
 from pathlib import Path
 import shutil
+import threading
 import time
 from typing import Any
 import urllib.error
@@ -34,6 +35,7 @@ import pyedflib
 from scipy.signal import butter, filtfilt, iirnotch, resample_poly, sosfiltfilt
 
 logger = logging.getLogger(__name__)
+_EDFLIB_LOCK = threading.Lock()
 
 # Canonical mapping from raw EDF labels (SHHS1, Dreem, BOAS, etc.) to internal names
 CHANNEL_ALIASES: dict[str, list[str]] = {
@@ -235,32 +237,33 @@ def read_edf_channels(
         requested_canonical_channels = DEFAULT_SHHS_CHANNELS
 
     edf_path = Path(edf_path)
-    reader = pyedflib.EdfReader(str(edf_path))
-    try:
-        raw_labels = reader.getSignalLabels()
-        label_to_idx = {lbl.strip(): idx for idx, lbl in enumerate(raw_labels)}
-        label_to_idx_upper = {lbl.strip().upper(): idx for idx, lbl in enumerate(raw_labels)}
+    with _EDFLIB_LOCK:
+        reader = pyedflib.EdfReader(str(edf_path))
+        try:
+            raw_labels = reader.getSignalLabels()
+            label_to_idx = {lbl.strip(): idx for idx, lbl in enumerate(raw_labels)}
+            label_to_idx_upper = {lbl.strip().upper(): idx for idx, lbl in enumerate(raw_labels)}
 
-        signals_dict: dict[str, np.ndarray] = {}
-        fs_dict: dict[str, float] = {}
-        duration_sec = float(reader.getFileDuration())
+            signals_dict: dict[str, np.ndarray] = {}
+            fs_dict: dict[str, float] = {}
+            duration_sec = float(reader.getFileDuration())
 
-        for canon_name in requested_canonical_channels:
-            aliases = CHANNEL_ALIASES.get(canon_name, [canon_name])
-            matched_idx = None
-            for alias in aliases:
-                if alias in label_to_idx:
-                    matched_idx = label_to_idx[alias]
-                    break
-                if alias.upper() in label_to_idx_upper:
-                    matched_idx = label_to_idx_upper[alias.upper()]
-                    break
+            for canon_name in requested_canonical_channels:
+                aliases = CHANNEL_ALIASES.get(canon_name, [canon_name])
+                matched_idx = None
+                for alias in aliases:
+                    if alias in label_to_idx:
+                        matched_idx = label_to_idx[alias]
+                        break
+                    if alias.upper() in label_to_idx_upper:
+                        matched_idx = label_to_idx_upper[alias.upper()]
+                        break
 
-            if matched_idx is not None:
-                signals_dict[canon_name] = reader.readSignal(matched_idx).astype(np.float64)
-                fs_dict[canon_name] = float(reader.getSampleFrequency(matched_idx))
-    finally:
-        reader.close()
+                if matched_idx is not None:
+                    signals_dict[canon_name] = reader.readSignal(matched_idx).astype(np.float64)
+                    fs_dict[canon_name] = float(reader.getSampleFrequency(matched_idx))
+        finally:
+            reader.close()
 
     return signals_dict, fs_dict, duration_sec
 

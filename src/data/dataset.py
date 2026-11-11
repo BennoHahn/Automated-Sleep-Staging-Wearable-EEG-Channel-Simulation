@@ -179,11 +179,13 @@ class SleepStageDataset(Dataset):
         is_train: bool = False,
         augmentation_cfg: dict[str, Any] | None = None,
         storage_dtype: Any = None,
+        defer_augmentation_to_batch: bool = False,
     ) -> None:
         super().__init__()
         self.use_context = bool(use_context)
         self.seq_len = int(seq_len)
         self.is_train = bool(is_train)
+        self.defer_augmentation_to_batch = bool(defer_augmentation_to_batch)
 
         aug = augmentation_cfg or {}
         self.aug_enabled = bool(aug.get("enabled", True)) and self.is_train
@@ -266,6 +268,10 @@ class SleepStageDataset(Dataset):
         subj_y = self.subject_labels[s_idx]
 
         if not self.use_context:
+            if self.defer_augmentation_to_batch:
+                return torch.from_numpy(subj_x[ep_idx]), torch.tensor(
+                    subj_y[ep_idx], dtype=torch.long
+                )
             x = subj_x[ep_idx].astype(np.float32, copy=False)  # (C, 3000)
             y = subj_y[ep_idx]  # scalar int64
             if self.aug_enabled:
@@ -274,8 +280,12 @@ class SleepStageDataset(Dataset):
                 y, dtype=torch.long
             )
         else:
-            x_seq = subj_x[ep_idx : ep_idx + self.seq_len].astype(np.float32, copy=False)  # (M, C, 3000)
             y_seq = subj_y[ep_idx : ep_idx + self.seq_len]  # (M,)
+            if self.defer_augmentation_to_batch:
+                return torch.from_numpy(subj_x[ep_idx : ep_idx + self.seq_len]), torch.from_numpy(
+                    y_seq.astype(np.int64, copy=False)
+                )
+            x_seq = subj_x[ep_idx : ep_idx + self.seq_len].astype(np.float32, copy=False)  # (M, C, 3000)
             if self.aug_enabled:
                 x_seq = np.stack([self._augment_single_epoch(ep) for ep in x_seq], axis=0)
             return torch.from_numpy(x_seq), torch.from_numpy(
