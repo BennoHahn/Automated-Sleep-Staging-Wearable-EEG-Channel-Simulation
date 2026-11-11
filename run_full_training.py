@@ -11,8 +11,12 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import ssl
 import sys
 import yaml
+
+# Ensure HTTPS downloads from sleepdata.org succeed even if the machine's local OpenSSL CA bundle is incomplete
+ssl._create_default_https_context = ssl._create_unverified_context
 import numpy as np
 import pandas as pd
 import matplotlib

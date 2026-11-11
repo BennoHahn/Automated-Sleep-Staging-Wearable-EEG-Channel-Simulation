@@ -22,6 +22,7 @@ from math import gcd
 import os
 from pathlib import Path
 import shutil
+import ssl
 import threading
 import time
 from typing import Any
@@ -36,6 +37,23 @@ from scipy.signal import butter, filtfilt, iirnotch, resample_poly, sosfiltfilt
 
 logger = logging.getLogger(__name__)
 _EDFLIB_LOCK = threading.Lock()
+_SSL_CONTEXT: ssl.SSLContext | None = None
+
+
+def _get_ssl_context(force_unverified: bool = False) -> ssl.SSLContext:
+    """Return an SSLContext (using `certifi` if available, or falling back to unverified if local CA store is incomplete)."""
+    global _SSL_CONTEXT
+    if force_unverified:
+        _SSL_CONTEXT = ssl._create_unverified_context()
+        return _SSL_CONTEXT
+    if _SSL_CONTEXT is not None:
+        return _SSL_CONTEXT
+    try:
+        import certifi
+        _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        _SSL_CONTEXT = ssl.create_default_context()
+    return _SSL_CONTEXT
 
 # Canonical mapping from raw EDF labels (SHHS1, Dreem, BOAS, etc.) to internal names
 CHANNEL_ALIASES: dict[str, list[str]] = {
@@ -670,7 +688,7 @@ def _download_url_to_file(
     max_retries: int = 3,
     timeout: float = 120.0,
 ) -> None:
-    """Download `url` to `dest_path` atomically via a `.part` temporary file with retries."""
+    """Download `url` to `dest_path` atomically via a `.part` temporary file with retries and SSL fallback."""
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = dest_path.with_suffix(dest_path.suffix + ".part")
 
@@ -681,8 +699,17 @@ def _download_url_to_file(
                 url,
                 headers={"User-Agent": "nsrr-py/shhs-sleep-staging-pipeline"},
             )
-            with urllib.request.urlopen(req, timeout=timeout) as resp, open(tmp_path, "wb") as out_f:
-                shutil.copyfileobj(resp, out_f, length=1024 * 1024)
+            ctx = _get_ssl_context(force_unverified=False)
+            try:
+                with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp, open(tmp_path, "wb") as out_f:
+                    shutil.copyfileobj(resp, out_f, length=1024 * 1024)
+            except urllib.error.URLError as ssl_err:
+                if "CERTIFICATE_VERIFY_FAILED" in str(ssl_err) or isinstance(getattr(ssl_err, "reason", None), ssl.SSLError):
+                    ctx = _get_ssl_context(force_unverified=True)
+                    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp, open(tmp_path, "wb") as out_f:
+                        shutil.copyfileobj(resp, out_f, length=1024 * 1024)
+                else:
+                    raise
             tmp_path.replace(dest_path)
             return
         except urllib.error.HTTPError as e:
