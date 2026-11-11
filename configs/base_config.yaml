@@ -12,17 +12,32 @@ dataset:
   name: shhs          # dataset-agnostic loader; later: bitbrain_boas (ds005555)
   mains_freq_hz: 60   # SHHS is US-based; use 50 for European datasets
 
+cohort_filter:
+  metadata_csv: Dataset_Information/shhs1-dataset-0.21.0.csv
+  healthy_only: true            # Active: filter for healthy sleepers without sleep apnea (AHI < max_ahi)
+  max_ahi: 5.0                  # Clinical normal threshold: ahi_a0h3 < 5.0 and rdi3p < 5.0 (1,771 SHHS1 subjects)
+  # Quality & duration filters below are configured and ready, but disabled (0 / 1 / false) for now:
+  min_recording_hours: 0.0      # Set to 5.0 later to require total recording time (timebedp) >= 5.0 hours
+  min_usable_eeg_hours: 0       # Set to 5 later to require usable EEG (eeg1dur & eeg2dur) >= 5 hours
+  min_eeg_quality_rating: 1     # 1 = keep all ratings (1..4); set to 3 or 4 later for high-rated EEG only
+  min_eog_quality_rating: 1     # 1 = keep all ratings (1..4); set to 3 or 4 later for high-rated EOG only
+  exclude_abnormal_eeg: false   # Set to true later to exclude abnoreeg == 1
+  max_subjects: null            # null = use all matching subjects; or set an integer (e.g., 200) to cap cohort size
+
 preprocessing:
+  channels: [C4-A1, C3-A2, EOG(L), EOG(R)]  # Save all 4 EEG + EOG channels (Chin EMG excluded)
+  storage_dtype: float16                     # Lossless 16-bit float after z-score (~23 MB/subject for 4 channels)
+  delete_raw_edf_after_preprocess: true      # Delete temporary raw .edf/.xml after .npz is verified on disk
   target_fs: 100
   epoch_sec: 30
   bandpass:
     low_hz: 0.2
-    high_hz: 49.0     # use 0.3-40 Hz if the original fs is 100 Hz
+    high_hz: 49.0     # automatically clipped below Nyquist if native fs is 50 Hz (EOG)
     order: 5
     zero_phase: true
   notch:
     enabled: true
-    freq_hz: null     # null -> dataset.mains_freq_hz
+    freq_hz: null     # null -> dataset.mains_freq_hz (60 Hz)
     q: 30
   normalization: zscore_per_recording   # zscore_per_recording | none
   labels:               # AASM 5 classes
@@ -35,13 +50,13 @@ preprocessing:
 
 cv:
   n_folds: 10
-  split_ratio: {train: 0.8, val: 0.1, test: 0.1}   # subject-level only
+  split_ratio: {train: 0.8, val: 0.1, test: 0.1}   # strict subject-level split
   split_level: subject
 
 model:
   name: tinysleepnet
-  use_context: false  # Model A (context-blind); true -> Model B (LSTM)
-  seq_len: 20         # M epochs, used when use_context is true
+  use_context: true   # Model B (Context-Aware CNN + LSTM); false -> Model A (Context-Blind CNN)
+  seq_len: 20         # M = 20 epochs (10 minutes) sequence length when use_context is true
   n_classes: 5
   dropout: 0.5
   lstm_hidden: 128
@@ -56,11 +71,11 @@ training:
   optimizer: adam
   lr: 1.0e-4
   weight_decay: 1.0e-3
-  batch_size: 128
-  max_epochs: 200
-  early_stopping_patience: 50
+  batch_size: 32                # 32 sequences of 20 epochs (= 640 epochs/step) for use_context=True
+  max_epochs: 100               # Safety ceiling (converges earlier with early stopping)
+  early_stopping_patience: 20   # Stop after 20 epochs without validation Macro-F1 improvement
   monitor: val_macro_f1
-  class_weighted_loss: false
+  class_weighted_loss: sqrt     # Options: "sqrt" | "tinysleepnet" | "balanced" | false
   device: auto
   augmentation:
     enabled: true

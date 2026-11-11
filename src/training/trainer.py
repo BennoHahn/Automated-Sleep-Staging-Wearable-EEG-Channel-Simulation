@@ -19,6 +19,8 @@ Caching & Resumability:
 from __future__ import annotations
 
 import copy
+import gc
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -170,19 +172,30 @@ def compute_class_weights(
     mode: str | bool = False,
     device: torch.device | None = None,
 ) -> torch.Tensor | None:
-    """Compute optional class weight tensor for `nn.CrossEntropyLoss`."""
+    """Compute optional class weight tensor for `nn.CrossEntropyLoss`.
+
+    Supported `mode` values:
+    - `False` / `"none"`: Unweighted Cross-Entropy (`None`)
+    - `"tinysleepnet"`: Supratak & Guo (2020) weights `[1.0, 1.5, 1.0, 1.0, 1.0]`
+    - `"sqrt"`: Square-root damped inverse class frequency `(total / count) ** 0.5`
+    - `True` / `"balanced"`: Full inverse class frequency `total / (n_classes * count)`
+    """
     if not mode or str(mode).lower() in ("false", "none"):
         return None
-    if str(mode).lower() == "tinysleepnet":
+    mode_str = str(mode).strip().lower()
+    if mode_str == "tinysleepnet":
         # Supratak & Guo (2020) weight N1 by 1.5 and all other stages by 1.0
         w = np.array([1.0, 1.5, 1.0, 1.0, 1.0], dtype=np.float32)[:n_classes]
     else:
-        # Balanced inverse class frequency
         counts = np.bincount(labels[(labels >= 0) & (labels < n_classes)], minlength=n_classes)
         total = max(float(counts.sum()), 1.0)
-        w = np.where(counts > 0, total / (n_classes * np.maximum(counts, 1)), 1.0).astype(
+        inv_freq = np.where(counts > 0, total / (n_classes * np.maximum(counts, 1)), 1.0).astype(
             np.float32
         )
+        if mode_str == "sqrt":
+            w = np.sqrt(inv_freq).astype(np.float32)
+        else:
+            w = inv_freq
         w = w / np.mean(w)
     tensor_w = torch.tensor(w, dtype=torch.float32)
     return tensor_w.to(device) if device is not None else tensor_w
@@ -345,6 +358,168 @@ def load_fold_result_json(path: str | Path) -> dict[str, Any]:
     return _deserialize_fold_result(payload)
 
 
+def normalize_class_weight_mode(mode: str | bool | None) -> str:
+    """Return canonical lowercase string (`'none'`, `'sqrt'`, `'tinysleepnet'`, `'balanced'`) for class weight mode."""
+    if mode is None or mode is False:
+        return "none"
+    if mode is True:
+        return "balanced"
+    s = str(mode).strip().lower()
+    if s in ("", "false", "none", "0", "off"):
+        return "none"
+    if s in ("true", "balanced", "inverse"):
+        return "balanced"
+    if s in ("sqrt", "square_root"):
+        return "sqrt"
+    if s in ("tinysleepnet", "tsn"):
+        return "tinysleepnet"
+    return s
+
+
+def build_settings_signature(
+    config_name: str,
+    channel_config: dict[str, Any],
+    base_config: dict[str, Any],
+    fold_split: dict[str, Any],
+    use_context_override: bool | None = None,
+    max_epochs_override: int | None = None,
+    class_weight_mode_override: str | bool | None = None,
+    batch_size_override: int | None = None,
+    early_stopping_patience_override: int | None = None,
+) -> dict[str, Any]:
+    """Build a deterministic signature of all dataset, channel, and hyperparameter settings for a fold.
+
+    Used to verify that a cached `fold_XX.json` or `.pt` checkpoint on disk was trained with
+    the exact same cohort split, channel configuration, context setting, class-weight mode,
+    batch size, max epochs, and early-stopping patience before resuming from it.
+    """
+    train_cfg = base_config.get("training", {})
+    model_cfg = base_config.get("model", {})
+
+    use_context = (
+        bool(model_cfg.get("use_context", False))
+        if use_context_override is None
+        else bool(use_context_override)
+    )
+    seq_len = int(model_cfg.get("seq_len", 20)) if use_context else 1
+
+    if batch_size_override is not None:
+        effective_bs = int(batch_size_override)
+    else:
+        effective_bs = int(train_cfg.get("batch_size", 128))
+        if use_context:
+            effective_bs = min(effective_bs, int(train_cfg.get("seq_batch_size", 32)))
+
+    max_epochs = (
+        int(train_cfg.get("max_epochs", 200))
+        if max_epochs_override is None
+        else int(max_epochs_override)
+    )
+    patience = (
+        int(train_cfg.get("early_stopping_patience", 50))
+        if early_stopping_patience_override is None
+        else int(early_stopping_patience_override)
+    )
+    raw_cw = (
+        train_cfg.get("class_weighted_loss", False)
+        if class_weight_mode_override is None
+        else class_weight_mode_override
+    )
+    cw_mode = normalize_class_weight_mode(raw_cw)
+
+    train_ids = sorted([str(x) for x in fold_split.get("train", [])])
+    val_ids = sorted([str(x) for x in fold_split.get("val", [])])
+    test_ids = sorted([str(x) for x in fold_split.get("test", [])])
+    split_blob = json.dumps(
+        {"train": train_ids, "val": val_ids, "test": test_ids},
+        sort_keys=True,
+    ).encode("utf-8")
+    split_sha1 = hashlib.sha1(split_blob).hexdigest()[:16]
+
+    channels_blob = json.dumps(channel_config.get("channels", []), sort_keys=True)
+
+    return {
+        "config_name": str(config_name),
+        "fold": int(fold_split.get("fold", 0)),
+        "channels_spec": channels_blob,
+        "use_context": bool(use_context),
+        "seq_len": int(seq_len),
+        "class_weighted_loss": cw_mode,
+        "max_epochs": int(max_epochs),
+        "early_stopping_patience": int(patience),
+        "batch_size": int(effective_bs),
+        "lr": float(train_cfg.get("lr", 1e-4)),
+        "weight_decay": float(train_cfg.get("weight_decay", 1e-3)),
+        "monitor": str(train_cfg.get("monitor", "val_macro_f1")),
+        "n_train_subjects": len(train_ids),
+        "n_val_subjects": len(val_ids),
+        "n_test_subjects": len(test_ids),
+        "split_sha1": split_sha1,
+    }
+
+
+def settings_signatures_match(
+    saved_sig: dict[str, Any] | None,
+    expected_sig: dict[str, Any],
+) -> tuple[bool, str]:
+    """Compare a saved fold's `settings_signature` against `expected_sig`, returning `(is_match, reason)`."""
+    if not saved_sig or not isinstance(saved_sig, dict):
+        return False, "missing settings_signature in cached fold"
+    for k, exp_v in expected_sig.items():
+        if k not in saved_sig:
+            return False, f"missing key '{k}'"
+        sav_v = saved_sig[k]
+        if isinstance(exp_v, float):
+            if not np.isclose(float(sav_v), exp_v, rtol=1e-5, atol=1e-8):
+                return False, f"{k} mismatch (saved={sav_v} vs current={exp_v})"
+        elif sav_v != exp_v:
+            return False, f"{k} mismatch (saved={sav_v} vs current={exp_v})"
+    return True, "exact match"
+
+
+def get_experiment_results_dir(
+    root_dir: str | Path,
+    base_config: dict[str, Any],
+    n_subjects: int,
+    use_context: bool | None = None,
+    class_weight_mode: str | bool | None = None,
+    batch_size: int | None = None,
+    max_epochs: int | None = None,
+    early_stopping_patience: int | None = None,
+) -> Path:
+    """Return a settings-specific directory inside `results/` so distinct runs never overwrite each other."""
+    root_dir = Path(root_dir)
+    base_results = root_dir / base_config.get("paths", {}).get("results_dir", "results")
+    train_cfg = base_config.get("training", {})
+    model_cfg = base_config.get("model", {})
+    cf = base_config.get("cohort_filter", {})
+
+    ctx = bool(model_cfg.get("use_context", True)) if use_context is None else bool(use_context)
+    cw = normalize_class_weight_mode(
+        train_cfg.get("class_weighted_loss", "sqrt") if class_weight_mode is None else class_weight_mode
+    )
+    bs = int(train_cfg.get("batch_size", 32)) if batch_size is None else int(batch_size)
+    if ctx and batch_size is None:
+        bs = min(bs, int(train_cfg.get("seq_batch_size", 32)))
+    ep = int(train_cfg.get("max_epochs", 100)) if max_epochs is None else int(max_epochs)
+    pat = (
+        int(train_cfg.get("early_stopping_patience", 20))
+        if early_stopping_patience is None
+        else int(early_stopping_patience)
+    )
+
+    cohort_tag = "healthy" if bool(cf.get("enabled", True)) and bool(cf.get("healthy_only", True)) else "all"
+    min_q = max(int(cf.get("min_eeg_quality_rating", 1) or 1), int(cf.get("min_eog_quality_rating", 1) or 1))
+    if min_q > 1:
+        cohort_tag += f"_q{min_q}"
+    min_h = max(float(cf.get("min_recording_hours", 0.0) or 0.0), float(cf.get("min_usable_eeg_hours", 0.0) or 0.0))
+    if min_h > 0:
+        cohort_tag += f"_h{min_h:g}"
+
+    run_folder = f"shhs1_{cohort_tag}_n{n_subjects}_ctx{ctx}_w{cw}_bs{bs}_ep{ep}_pat{pat}"
+    return base_results / run_folder
+
+
 def _recover_fold_result_from_checkpoint(
     ckpt_path: str | Path,
     test_records: list[dict[str, Any]],
@@ -395,6 +570,7 @@ def _recover_fold_result_from_checkpoint(
         "best_val_score": float(payload.get("best_val_score", 0.0)),
         "elapsed_sec": 0.0,
         "checkpoint_path": str(ckpt_path),
+        "settings_signature": payload.get("settings_signature"),
         "train_subjects": list(payload.get("train_subjects", [])),
         "val_subjects": list(payload.get("val_subjects", [])),
         "test_subjects": list(payload.get("test_subjects", [r["subject_id"] for r in test_records])),
@@ -415,6 +591,10 @@ def train_one_fold(
     config_name: str = "default",
     use_context_override: bool | None = None,
     max_epochs_override: int | None = None,
+    class_weight_mode_override: str | bool | None = None,
+    batch_size_override: int | None = None,
+    early_stopping_patience_override: int | None = None,
+    settings_signature: dict[str, Any] | None = None,
     checkpoint_dir: str | Path | None = None,
     verbose: bool = True,
 ) -> dict[str, Any]:
@@ -434,21 +614,51 @@ def train_one_fold(
         else bool(use_context_override)
     )
     seq_len = int(model_cfg.get("seq_len", 20))
-    batch_size = int(train_cfg.get("batch_size", 128))
-    if use_context:
-        batch_size = min(batch_size, int(train_cfg.get("seq_batch_size", 32)))
+    if batch_size_override is not None:
+        batch_size = int(batch_size_override)
+    else:
+        batch_size = int(train_cfg.get("batch_size", 128))
+        if use_context:
+            batch_size = min(batch_size, int(train_cfg.get("seq_batch_size", 32)))
 
     max_epochs = (
         int(train_cfg.get("max_epochs", 200))
         if max_epochs_override is None
         else int(max_epochs_override)
     )
-    patience = int(train_cfg.get("early_stopping_patience", 50))
+    patience = (
+        int(train_cfg.get("early_stopping_patience", 50))
+        if early_stopping_patience_override is None
+        else int(early_stopping_patience_override)
+    )
+    cw_mode = (
+        train_cfg.get("class_weighted_loss", False)
+        if class_weight_mode_override is None
+        else class_weight_mode_override
+    )
     lr = float(train_cfg.get("lr", 1e-4))
     weight_decay = float(train_cfg.get("weight_decay", 1e-3))
     grad_clip = float(train_cfg.get("grad_clip", 5.0))
     monitor_key = str(train_cfg.get("monitor", "val_macro_f1"))
     epoch_sec = float(prep_cfg.get("epoch_sec", 30.0))
+
+    if settings_signature is None:
+        settings_signature = build_settings_signature(
+            config_name=config_name,
+            channel_config=channel_config,
+            base_config=base_config,
+            fold_split={
+                "fold": fold_idx,
+                "train": [r["subject_id"] for r in train_records],
+                "val": [r["subject_id"] for r in val_records],
+                "test": [r["subject_id"] for r in test_records],
+            },
+            use_context_override=use_context,
+            max_epochs_override=max_epochs,
+            class_weight_mode_override=cw_mode,
+            batch_size_override=batch_size,
+            early_stopping_patience_override=patience,
+        )
 
     train_ds = SleepStageDataset(
         subject_records=train_records,
@@ -458,10 +668,12 @@ def train_one_fold(
         is_train=True,
         augmentation_cfg=train_cfg.get("augmentation", {}),
     )
+    n_channels = train_ds.n_channels
+    channel_names = list(train_ds.channel_names)
 
     model = build_tinysleepnet_from_config(
         base_config,
-        in_channels=train_ds.n_channels,
+        in_channels=n_channels,
         use_context_override=use_context,
     ).to(device)
 
@@ -469,10 +681,13 @@ def train_one_fold(
     class_weights = compute_class_weights(
         all_train_labels,
         n_classes=model.n_classes,
-        mode=train_cfg.get("class_weighted_loss", False),
+        mode=cw_mode,
         device=device,
     )
     is_dml = str(device).startswith("privateuseone")
+    is_cuda = device.type == "cuda"
+    if is_cuda:
+        torch.backends.cudnn.benchmark = True
     criterion = nn.CrossEntropyLoss(weight=class_weights)
     if is_dml:
         optimizer: torch.optim.Optimizer = DirectMLAdam(
@@ -489,14 +704,14 @@ def train_one_fold(
             weight_decay=weight_decay,
         )
 
-    # Pre-stage contiguous training tensors in RAM/VRAM to eliminate Python DataLoader overhead
+    # Pre-stage contiguous training tensors in RAM/VRAM for small-to-medium non-context datasets
     aug_cfg = train_cfg.get("augmentation", {})
     aug_enabled = bool(aug_cfg.get("enabled", True))
     max_shift_frac = float(aug_cfg.get("max_shift_frac", 0.1))
     sign_flip_prob = float(aug_cfg.get("sign_flip_prob", 0.5))
     max_shift_samples = int(round(train_ds.epoch_samples * max_shift_frac)) if aug_enabled else 0
 
-    if not use_context:
+    if not use_context and len(train_records) <= 50:
         x_train_all = torch.from_numpy(
             np.concatenate(train_ds.subject_epochs, axis=0).astype(np.float32, copy=False)
         )
@@ -514,6 +729,7 @@ def train_one_fold(
             batch_size=batch_size,
             shuffle=True,
             drop_last=False,
+            pin_memory=is_cuda,
         )
 
     best_score = -float("inf")
@@ -547,8 +763,8 @@ def train_one_fold(
                         )
                         bx = bx * signs
 
-                bx = bx.to(device)
-                by = by.to(device)
+                bx = bx.to(device, non_blocking=is_cuda)
+                by = by.to(device, non_blocking=is_cuda)
                 optimizer.zero_grad()
                 logits = model(bx)
                 loss = criterion(logits, by)
@@ -566,8 +782,8 @@ def train_one_fold(
             train_ds.on_epoch_start()
             assert train_loader is not None
             for bx, by in train_loader:
-                bx = bx.to(device)
-                by = by.to(device)
+                bx = bx.to(device, non_blocking=is_cuda)
+                by = by.to(device, non_blocking=is_cuda)
                 optimizer.zero_grad()
                 logits = model(bx)
                 loss = criterion(logits.reshape(-1, model.n_classes), by.reshape(-1))
@@ -643,6 +859,14 @@ def train_one_fold(
                 )
             break
 
+    # Free training dataset buffers before test evaluation
+    del train_ds
+    if x_train_all is not None:
+        del x_train_all, y_train_all
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     # Restore best validation model and evaluate on held-out Test subject(s)
     model.load_state_dict(best_state)
     test_eval = evaluate_subject_list(
@@ -667,7 +891,8 @@ def train_one_fold(
                 "best_epoch": best_epoch,
                 "best_val_score": best_score,
                 "max_epochs_configured": max_epochs,
-                "channel_names": train_ds.channel_names,
+                "channel_names": channel_names,
+                "settings_signature": settings_signature,
                 "train_subjects": [r["subject_id"] for r in train_records],
                 "val_subjects": [r["subject_id"] for r in val_records],
                 "test_subjects": [r["subject_id"] for r in test_records],
@@ -679,9 +904,15 @@ def train_one_fold(
     elapsed_sec = time.time() - t_start
     if verbose:
         tm = test_eval["epoch_metrics"]
+        n_test_s = len(test_records)
+        subj_preview = (
+            str([r["subject_id"] for r in test_records])
+            if n_test_s <= 3
+            else f"{n_test_s} subjects ({test_records[0]['subject_id']}..{test_records[-1]['subject_id']})"
+        )
         print(
             f"  -> [{config_name} | Fold {fold_idx:02d} DONE in {elapsed_sec:.1f}s] "
-            f"Test Subject(s) { [r['subject_id'] for r in test_records] }: "
+            f"Test {subj_preview}: "
             f"ACC={tm['accuracy']:.3f} | Kappa={tm['kappa']:.3f} | MCC={tm['mcc']:.3f} | Macro-F1={tm['macro_f1']:.3f}"
         )
 
@@ -689,13 +920,14 @@ def train_one_fold(
         "config_name": config_name,
         "fold": fold_idx,
         "use_context": use_context,
-        "in_channels": train_ds.n_channels,
-        "channel_names": train_ds.channel_names,
+        "in_channels": n_channels,
+        "channel_names": channel_names,
         "max_epochs_configured": max_epochs,
         "best_epoch": best_epoch,
         "best_val_score": best_score,
         "elapsed_sec": elapsed_sec,
         "checkpoint_path": checkpoint_path_str,
+        "settings_signature": settings_signature,
         "train_subjects": [r["subject_id"] for r in train_records],
         "val_subjects": [r["subject_id"] for r in val_records],
         "test_subjects": [r["subject_id"] for r in test_records],
@@ -714,26 +946,33 @@ def run_cross_validation_for_config(
     config_name: str,
     use_context_override: bool | None = None,
     max_epochs_override: int | None = None,
+    class_weight_mode_override: str | bool | None = None,
+    batch_size_override: int | None = None,
+    early_stopping_patience_override: int | None = None,
     max_folds: int | None = None,
     results_dir: str | Path | None = None,
     resume: bool = True,
     force_retrain: bool = False,
     verbose: bool = True,
 ) -> dict[str, Any]:
-    """Run subject-independent K-fold cross-validation for one channel configuration with per-fold disk caching.
+    """Run subject-independent K-fold cross-validation for one channel configuration with strict settings-matched caching.
 
     Args:
-        all_records: List of preprocessed subject dicts.
+        all_records: List of preprocessed subject dicts (eager or lazy metadata dicts).
         splits: List of fold split dicts (`train`, `val`, `test` subject IDs).
         channel_config: Channel specification dict from `ablation_channels.yaml`.
         base_config: Base configuration dict from `base_config.yaml`.
-        config_name: Identifier of the channel configuration (e.g. `'full_psg'`).
+        config_name: Identifier of the channel configuration (e.g. `'dual_eeg'`).
         use_context_override: Override `model.use_context`.
         max_epochs_override: Override `training.max_epochs`.
+        class_weight_mode_override: Override `training.class_weighted_loss` (`'sqrt'`, `'tinysleepnet'`, `'balanced'`, `False`).
+        batch_size_override: Override `training.batch_size`.
+        early_stopping_patience_override: Override `training.early_stopping_patience`.
         max_folds: Optional limit on number of folds to run (`None` = all 10 folds).
         results_dir: Directory where checkpoints, per-fold JSONs, and aggregated summaries are saved.
         resume: If True (default) and `force_retrain=False`, loads any already-completed fold from
-            `results_dir/folds/{config_name}/fold_{fold_idx:02d}.json` instead of retraining it.
+            `results_dir/folds/{config_name}/fold_{fold_idx:02d}.json` ONLY if its `settings_signature`
+            matches the current run settings (cohort split, channels, context, class weights, batch size, epochs).
         force_retrain: If True, ignores cached fold files and retrains all folds from scratch.
         verbose: Print progress messages.
     """
@@ -749,6 +988,18 @@ def run_cross_validation_for_config(
 
     for sp in active_splits:
         fold_idx = int(sp["fold"])
+        expected_sig = build_settings_signature(
+            config_name=config_name,
+            channel_config=channel_config,
+            base_config=base_config,
+            fold_split=sp,
+            use_context_override=use_context_override,
+            max_epochs_override=max_epochs_override,
+            class_weight_mode_override=class_weight_mode_override,
+            batch_size_override=batch_size_override,
+            early_stopping_patience_override=early_stopping_patience_override,
+        )
+
         fold_cache_file = (
             folds_cache_dir / f"fold_{fold_idx:02d}.json"
             if folds_cache_dir is not None
@@ -760,47 +1011,80 @@ def run_cross_validation_for_config(
             else None
         )
 
-        # 1. Check if this fold's JSON result is already saved on disk
+        loaded_from_cache = False
+
+        # 1. Check if this fold's JSON result is already saved on disk AND matches current settings
         if (
             resume
             and not force_retrain
             and fold_cache_file is not None
             and fold_cache_file.exists()
         ):
-            fold_res = load_fold_result_json(fold_cache_file)
-            if verbose:
-                tm = fold_res["test_epoch_metrics"]
+            cached_fold_res = load_fold_result_json(fold_cache_file)
+            is_match, reason = settings_signatures_match(
+                cached_fold_res.get("settings_signature"),
+                expected_sig,
+            )
+            if is_match:
+                fold_res = cached_fold_res
+                loaded_from_cache = True
+                if verbose:
+                    tm = fold_res["test_epoch_metrics"]
+                    print(
+                        f"  [{config_name} | Fold {fold_idx:02d}] Loaded verified saved result from {fold_cache_file.name} "
+                        f"(best_ep={fold_res.get('best_epoch')}, Test ACC={tm['accuracy']:.3f}, "
+                        f"Kappa={tm['kappa']:.3f}, MCC={tm['mcc']:.3f}, Macro-F1={tm['macro_f1']:.3f})"
+                    )
+            elif verbose:
                 print(
-                    f"  [{config_name} | Fold {fold_idx:02d}] Loaded saved result from {fold_cache_file.name} "
-                    f"(best_ep={fold_res.get('best_epoch')}, Test ACC={tm['accuracy']:.3f}, "
-                    f"Kappa={tm['kappa']:.3f}, MCC={tm['mcc']:.3f}, Macro-F1={tm['macro_f1']:.3f})"
+                    f"  [{config_name} | Fold {fold_idx:02d}] Ignoring cached {fold_cache_file.name} "
+                    f"because settings changed ({reason}) -> retraining fold."
                 )
-        # 2. Check if a trained .pt model checkpoint already exists from an earlier run
-        elif (
-            resume
+
+        # 2. Check if a trained .pt model checkpoint exists AND matches current settings
+        if (
+            not loaded_from_cache
+            and resume
             and not force_retrain
             and ckpt_file is not None
             and ckpt_file.exists()
         ):
-            test_recs = [subj_map[sid] for sid in sp["test"] if sid in subj_map]
-            fold_res = _recover_fold_result_from_checkpoint(
-                ckpt_path=ckpt_file,
-                test_records=test_recs,
-                channel_config=channel_config,
-                base_config=base_config,
-                use_context_override=use_context_override,
-            )
-            if fold_cache_file is not None:
-                save_fold_result_json(fold_res, fold_cache_file)
-            if verbose:
-                tm = fold_res["test_epoch_metrics"]
-                print(
-                    f"  [{config_name} | Fold {fold_idx:02d}] Recovered from checkpoint {ckpt_file.name} "
-                    f"(best_ep={fold_res.get('best_epoch')}, Test ACC={tm['accuracy']:.3f}, "
-                    f"Kappa={tm['kappa']:.3f}, MCC={tm['mcc']:.3f}, Macro-F1={tm['macro_f1']:.3f})"
+            try:
+                ckpt_meta = torch.load(ckpt_file, map_location="cpu", weights_only=False)
+                is_match, reason = settings_signatures_match(
+                    ckpt_meta.get("settings_signature"),
+                    expected_sig,
                 )
+            except Exception as e:
+                is_match, reason = False, f"checkpoint read error ({e})"
+
+            if is_match:
+                test_recs = [subj_map[sid] for sid in sp["test"] if sid in subj_map]
+                fold_res = _recover_fold_result_from_checkpoint(
+                    ckpt_path=ckpt_file,
+                    test_records=test_recs,
+                    channel_config=channel_config,
+                    base_config=base_config,
+                    use_context_override=use_context_override,
+                )
+                loaded_from_cache = True
+                if fold_cache_file is not None:
+                    save_fold_result_json(fold_res, fold_cache_file)
+                if verbose:
+                    tm = fold_res["test_epoch_metrics"]
+                    print(
+                        f"  [{config_name} | Fold {fold_idx:02d}] Recovered verified checkpoint {ckpt_file.name} "
+                        f"(best_ep={fold_res.get('best_epoch')}, Test ACC={tm['accuracy']:.3f}, "
+                        f"Kappa={tm['kappa']:.3f}, MCC={tm['mcc']:.3f}, Macro-F1={tm['macro_f1']:.3f})"
+                    )
+            elif verbose:
+                print(
+                    f"  [{config_name} | Fold {fold_idx:02d}] Ignoring checkpoint {ckpt_file.name} "
+                    f"because settings changed ({reason}) -> retraining fold."
+                )
+
         # 3. Otherwise train this fold and immediately save both .pt and fold_XX.json
-        else:
+        if not loaded_from_cache:
             train_recs = [subj_map[sid] for sid in sp["train"] if sid in subj_map]
             val_recs = [subj_map[sid] for sid in sp["val"] if sid in subj_map]
             test_recs = [subj_map[sid] for sid in sp["test"] if sid in subj_map]
@@ -815,6 +1099,10 @@ def run_cross_validation_for_config(
                 config_name=config_name,
                 use_context_override=use_context_override,
                 max_epochs_override=max_epochs_override,
+                class_weight_mode_override=class_weight_mode_override,
+                batch_size_override=batch_size_override,
+                early_stopping_patience_override=early_stopping_patience_override,
+                settings_signature=expected_sig,
                 checkpoint_dir=ckpt_dir,
                 verbose=verbose,
             )

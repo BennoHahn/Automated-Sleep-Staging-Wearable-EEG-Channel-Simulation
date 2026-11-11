@@ -207,8 +207,34 @@ class SequentialLSTMHead(nn.Module):
         self.drop = nn.Dropout(p=dropout)
         self.fc = nn.Linear(lstm_hidden, n_classes)
 
+    def _forward_lstm_dml(self, seq_features: torch.Tensor) -> torch.Tensor:
+        """DirectML-native LSTM cell unroll using `self.lstm` weights (avoids unsupported `aten::_thnn_fused_lstm_cell`)."""
+        batch_size, seq_len, _ = seq_features.shape
+        hidden_size = self.lstm.hidden_size
+        # Pre-compute input-to-hidden projection across all time steps in one fused GPU matmul
+        gates_x = F.linear(seq_features, self.lstm.weight_ih_l0, self.lstm.bias_ih_l0)
+        h_t = torch.zeros(batch_size, hidden_size, device=seq_features.device, dtype=seq_features.dtype)
+        c_t = torch.zeros(batch_size, hidden_size, device=seq_features.device, dtype=seq_features.dtype)
+        w_hh = self.lstm.weight_hh_l0
+        b_hh = self.lstm.bias_hh_l0
+        outputs = []
+        for t in range(seq_len):
+            gates = gates_x[:, t, :] + F.linear(h_t, w_hh, b_hh)
+            i_gate, f_gate, g_gate, o_gate = gates.chunk(4, dim=-1)
+            i_t = torch.sigmoid(i_gate)
+            f_t = torch.sigmoid(f_gate)
+            g_t = torch.tanh(g_gate)
+            o_t = torch.sigmoid(o_gate)
+            c_t = f_t * c_t + i_t * g_t
+            h_t = o_t * torch.tanh(c_t)
+            outputs.append(h_t)
+        return torch.stack(outputs, dim=1)
+
     def forward(self, seq_features: torch.Tensor) -> torch.Tensor:
-        lstm_out, _ = self.lstm(seq_features)  # (Batch, M, lstm_hidden)
+        if seq_features.device.type == "privateuseone":
+            lstm_out = self._forward_lstm_dml(seq_features)
+        else:
+            lstm_out, _ = self.lstm(seq_features)  # (Batch, M, lstm_hidden)
         out = self.drop(lstm_out)
         return self.fc(out)  # (Batch, M, n_classes)
 

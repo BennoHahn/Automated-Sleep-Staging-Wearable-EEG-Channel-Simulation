@@ -122,11 +122,29 @@ def compute_channel_operation(
         raise ValueError(f"Unsupported channel simulation operation: '{op}'")
 
 
+def is_channel_config_compatible(
+    available_channels: list[str],
+    channel_config: dict[str, Any],
+) -> bool:
+    """Return True if all input channels required by `channel_config` are present in `available_channels`."""
+    avail_set = set(available_channels)
+    for spec in channel_config.get("channels", []):
+        if isinstance(spec, str):
+            if spec not in avail_set:
+                return False
+        elif isinstance(spec, dict):
+            for inp in spec.get("inputs", []):
+                if inp not in avail_set:
+                    return False
+    return True
+
+
 def apply_channel_config(
     subject_data: dict[str, Any],
     channel_config: dict[str, Any],
     normalize: bool = True,
     norm_mode: str | None = None,
+    out_dtype: Any = np.float32,
 ) -> tuple[np.ndarray, list[str]]:
     """Extract or mathematically simulate the channels defined in `channel_config` for one subject.
 
@@ -134,19 +152,35 @@ def apply_channel_config(
     physical signals (`uV`) so that shared reference electrodes cancel out properly before
     per-recording z-score normalization is applied to the resulting channel(s).
 
+    Supports both eager records (`subject_data['epochs']` in RAM) and lazy records
+    (`subject_data['epochs'] is None`, loaded on demand from `subject_data['npz_path']`).
+
     Args:
-        subject_data: Dictionary returned by `preprocess_subject` or `load_preprocessed_subject`.
+        subject_data: Dictionary returned by `preprocess_subject`, `load_preprocessed_subject`,
+            or `load_preprocessed_subject_metadata`.
         channel_config: Single configuration dictionary from `ablation_channels.yaml`
             containing a `'channels'` list of channel specs (strings or dicts with `name, op, inputs`).
         normalize: Whether to normalize the resulting derived channels.
         norm_mode: Override normalization mode (defaults to `subject_data.get('normalization', 'zscore_per_recording')`).
+        out_dtype: Output numpy dtype (default `np.float32`; use `np.float16` for memory-efficient large cohorts).
 
     Returns:
         Tuple of:
-          - derived_epochs: float32 array of shape `(N_epochs, N_out_channels, T)`
+          - derived_epochs: array of shape `(N_epochs, N_out_channels, T)` with dtype `out_dtype`
           - derived_names: list[str] of output channel names
     """
-    epochs = subject_data["epochs"]
+    epochs = subject_data.get("epochs")
+    if epochs is None:
+        npz_path = subject_data.get("npz_path")
+        if not npz_path:
+            raise ValueError(
+                f"Subject record '{subject_data.get('subject_id')}' has neither 'epochs' nor 'npz_path'."
+            )
+        with np.load(Path(npz_path), allow_pickle=False) as archive:
+            epochs = archive["epochs"].astype(np.float32, copy=False)
+    else:
+        epochs = np.asarray(epochs, dtype=np.float32)
+
     available_channels = list(subject_data["channel_names"])
     already_normalized = bool(subject_data.get("is_normalized", False))
 
@@ -198,7 +232,7 @@ def apply_channel_config(
         ):
             derived_epochs = normalize_epochs(derived_epochs, mode=norm_mode)
 
-    return derived_epochs.astype(np.float32, copy=False), derived_names
+    return derived_epochs.astype(out_dtype, copy=False), derived_names
 
 
 def evaluate_simulation_fidelity(

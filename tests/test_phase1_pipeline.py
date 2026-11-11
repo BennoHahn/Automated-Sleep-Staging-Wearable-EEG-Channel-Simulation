@@ -175,6 +175,91 @@ class TestPhase1Pipeline(unittest.TestCase):
         self.assertIn("TST_min", ba)
         self.assertIn("SE_pct", ba)
 
+    def test_step6_cohort_selection_lazy_loading_and_settings_signature(self) -> None:
+        import tempfile
+        from src.data.preprocessing import (
+            load_preprocessed_subject_metadata,
+            save_preprocessed_subject,
+            select_shhs_cohort,
+        )
+        from src.training.trainer import (
+            build_settings_signature,
+            settings_signatures_match,
+        )
+
+        with open(PROJECT_ROOT / "configs/base_config.yaml", "r", encoding="utf-8") as f:
+            base_cfg = yaml.safe_load(f)
+
+        shhs_cfgs = load_ablation_configs(
+            PROJECT_ROOT / "configs/ablation_channels.yaml", section="shhs_configs"
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            selected_ids, df_meta = select_shhs_cohort(
+                base_cfg,
+                root_dir=PROJECT_ROOT,
+                save_csv_path=tmp_path / "cohort.csv",
+            )
+            self.assertEqual(len(selected_ids), 1771)
+            self.assertTrue((df_meta["ahi_a0h3"] < 5.0).all())
+
+            # Test float16 storage + lazy metadata loading + channel-selective loading
+            dummy_data = {
+                "subject_id": "shhs1-999999",
+                "epochs": np.random.randn(8, 4, 3000).astype(np.float32),
+                "labels": np.array([0, 1, 2, 3, 4, 2, 2, 0], dtype=np.int64),
+                "valid_epoch_indices": np.arange(8, dtype=np.int64),
+                "channel_names": ["C4-A1", "C3-A2", "EOG(L)", "EOG(R)"],
+                "fs": 100,
+                "epoch_sec": 30.0,
+                "normalization": "zscore_per_recording",
+                "is_normalized": False,
+                "storage_dtype": "float16",
+            }
+            npz_file = save_preprocessed_subject(dummy_data, tmp_path)
+            lazy_rec = load_preprocessed_subject_metadata(npz_file)
+            self.assertIsNone(lazy_rec["epochs"])
+            self.assertEqual(lazy_rec["n_epochs"], 8)
+
+            derived_dual, ch_names = apply_channel_config(
+                lazy_rec, shhs_cfgs["dual_eeg"], normalize=True, out_dtype=np.float16
+            )
+            self.assertEqual(derived_dual.shape, (8, 2, 3000))
+            self.assertEqual(derived_dual.dtype, np.float16)
+            self.assertEqual(ch_names, ["C4-A1", "C3-A2"])
+
+            # Test strict settings_signature verification
+            split_a = {"fold": 0, "train": ["s1", "s2"], "val": ["s3"], "test": ["s4"]}
+            sig1 = build_settings_signature(
+                config_name="dual_eeg",
+                channel_config=shhs_cfgs["dual_eeg"],
+                base_config=base_cfg,
+                fold_split=split_a,
+                use_context_override=True,
+                max_epochs_override=100,
+                class_weight_mode_override="sqrt",
+                batch_size_override=32,
+                early_stopping_patience_override=20,
+            )
+            ok, _ = settings_signatures_match(sig1, dict(sig1))
+            self.assertTrue(ok)
+
+            sig_diff_weights = build_settings_signature(
+                config_name="dual_eeg",
+                channel_config=shhs_cfgs["dual_eeg"],
+                base_config=base_cfg,
+                fold_split=split_a,
+                use_context_override=True,
+                max_epochs_override=100,
+                class_weight_mode_override="tinysleepnet",
+                batch_size_override=32,
+                early_stopping_patience_override=20,
+            )
+            ok_w, reason_w = settings_signatures_match(sig1, sig_diff_weights)
+            self.assertFalse(ok_w)
+            self.assertIn("class_weighted_loss", reason_w)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -23,7 +23,10 @@ import torch
 from torch.utils.data import Dataset
 
 from src.data.channel_sim import apply_channel_config
-from src.data.preprocessing import load_preprocessed_subject
+from src.data.preprocessing import (
+    load_preprocessed_subject,
+    load_preprocessed_subject_metadata,
+)
 
 
 def generate_subject_cv_splits(
@@ -98,7 +101,17 @@ def generate_subject_cv_splits(
         save_path = Path(save_path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
         with open(save_path, "w", encoding="utf-8") as f:
-            json.dump({"seed": seed, "n_folds": effective_folds, "splits": splits}, f, indent=2)
+            json.dump(
+                {
+                    "seed": seed,
+                    "n_folds": effective_folds,
+                    "n_subjects": n_subj,
+                    "subject_ids": unique_ids,
+                    "splits": splits,
+                },
+                f,
+                indent=2,
+            )
 
     return splits
 
@@ -108,6 +121,42 @@ def load_subject_cv_splits(split_path: str | Path) -> list[dict[str, Any]]:
     with open(Path(split_path), "r", encoding="utf-8") as f:
         payload = json.load(f)
     return payload["splits"]
+
+
+def ensure_subject_cv_splits(
+    subject_ids: list[str],
+    split_path: str | Path,
+    n_folds: int = 10,
+    seed: int = 42,
+) -> list[dict[str, Any]]:
+    """Load saved CV splits from `split_path` ONLY if they match `subject_ids`, `n_folds`, and `seed`; otherwise regenerate."""
+    split_path = Path(split_path)
+    unique_ids = sorted(list(dict.fromkeys(subject_ids)))
+    effective_folds = min(n_folds, len(unique_ids))
+
+    if split_path.exists():
+        try:
+            with open(split_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            splits = payload.get("splits", [])
+            if splits:
+                sp0 = splits[0]
+                saved_ids = sorted(list(set(sp0["train"]) | set(sp0["val"]) | set(sp0["test"])))
+                if (
+                    saved_ids == unique_ids
+                    and int(payload.get("n_folds", len(splits))) == effective_folds
+                    and int(payload.get("seed", seed)) == int(seed)
+                ):
+                    return splits
+        except Exception:
+            pass
+
+    return generate_subject_cv_splits(
+        subject_ids=unique_ids,
+        n_folds=n_folds,
+        seed=seed,
+        save_path=split_path,
+    )
 
 
 class SleepStageDataset(Dataset):
@@ -129,6 +178,7 @@ class SleepStageDataset(Dataset):
         seq_len: int = 20,
         is_train: bool = False,
         augmentation_cfg: dict[str, Any] | None = None,
+        storage_dtype: Any = None,
     ) -> None:
         super().__init__()
         self.use_context = bool(use_context)
@@ -140,13 +190,24 @@ class SleepStageDataset(Dataset):
         self.max_shift_frac = float(aug.get("max_shift_frac", 0.1))
         self.sign_flip_prob = float(aug.get("sign_flip_prob", 0.5))
 
+        # Use float16 in RAM when indexing large cohorts (>50 subjects) so only the active
+        # channel(s) in float16 are materialized in memory, and convert to float32 per batch.
+        if storage_dtype is None:
+            storage_dtype = np.float16 if len(subject_records) > 50 else np.float32
+        self.storage_dtype = storage_dtype
+
         self.subject_epochs: list[np.ndarray] = []
         self.subject_labels: list[np.ndarray] = []
         self.subject_ids: list[str] = []
         self.channel_names: list[str] = []
 
         for rec in subject_records:
-            derived_x, ch_names = apply_channel_config(rec, channel_config, normalize=True)
+            derived_x, ch_names = apply_channel_config(
+                rec,
+                channel_config,
+                normalize=True,
+                out_dtype=self.storage_dtype,
+            )
             self.subject_epochs.append(derived_x)
             self.subject_labels.append(rec["labels"].astype(np.int64))
             self.subject_ids.append(str(rec["subject_id"]))
@@ -185,7 +246,7 @@ class SleepStageDataset(Dataset):
 
     def _augment_single_epoch(self, x: np.ndarray) -> np.ndarray:
         """Apply random time-shift (`+-max_shift_frac`) and random sign flip to an epoch `(C, T)`."""
-        out = x.copy()
+        out = x.astype(np.float32, copy=True)
         if self.max_shift_frac > 0:
             max_shift = int(round(self.epoch_samples * self.max_shift_frac))
             if max_shift > 0:
@@ -205,19 +266,19 @@ class SleepStageDataset(Dataset):
         subj_y = self.subject_labels[s_idx]
 
         if not self.use_context:
-            x = subj_x[ep_idx]  # (C, 3000)
+            x = subj_x[ep_idx].astype(np.float32, copy=False)  # (C, 3000)
             y = subj_y[ep_idx]  # scalar int64
             if self.aug_enabled:
                 x = self._augment_single_epoch(x)
-            return torch.from_numpy(x.astype(np.float32, copy=False)), torch.tensor(
+            return torch.from_numpy(x), torch.tensor(
                 y, dtype=torch.long
             )
         else:
-            x_seq = subj_x[ep_idx : ep_idx + self.seq_len]  # (M, C, 3000)
+            x_seq = subj_x[ep_idx : ep_idx + self.seq_len].astype(np.float32, copy=False)  # (M, C, 3000)
             y_seq = subj_y[ep_idx : ep_idx + self.seq_len]  # (M,)
             if self.aug_enabled:
                 x_seq = np.stack([self._augment_single_epoch(ep) for ep in x_seq], axis=0)
-            return torch.from_numpy(x_seq.astype(np.float32, copy=False)), torch.from_numpy(
+            return torch.from_numpy(x_seq), torch.from_numpy(
                 y_seq.astype(np.int64, copy=False)
             )
 
@@ -225,12 +286,32 @@ class SleepStageDataset(Dataset):
 def load_subject_records_from_dir(
     processed_dir: str | Path,
     subject_ids: list[str] | None = None,
+    lazy: bool | None = None,
 ) -> list[dict[str, Any]]:
-    """Load preprocessed `.npz` subject records from `processed_dir`."""
+    """Load preprocessed `.npz` subject records from `processed_dir`.
+
+    Args:
+        processed_dir: Directory containing `{subject_id}.npz` files.
+        subject_ids: Optional whitelist of subject IDs to load (e.g. from `select_shhs_cohort`).
+            Only existing `.npz` files in `processed_dir` matching `subject_ids` are loaded.
+        lazy: If True, loads lightweight metadata + labels (`epochs=None`) and defers signal
+            loading to `apply_channel_config`. If `None` (default), automatically enables
+            `lazy=True` when `> 50` subjects are present so large cohorts (`1,771` subjects)
+            consume `< 15 MB` RAM instead of `> 40 GB`.
+    """
     processed_dir = Path(processed_dir)
     if subject_ids is None:
         npz_files = sorted(processed_dir.glob("*.npz"))
     else:
-        npz_files = [processed_dir / f"{sid}.npz" for sid in subject_ids]
+        npz_files = [
+            processed_dir / f"{sid}.npz"
+            for sid in subject_ids
+            if (processed_dir / f"{sid}.npz").exists()
+        ]
 
+    if lazy is None:
+        lazy = len(npz_files) > 50
+
+    if lazy:
+        return [load_preprocessed_subject_metadata(p) for p in npz_files]
     return [load_preprocessed_subject(p) for p in npz_files]

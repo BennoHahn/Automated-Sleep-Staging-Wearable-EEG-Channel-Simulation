@@ -3,6 +3,10 @@
 venv/
 env/
 
+# Secret NSRR API token files (never upload tokens to GitHub)
+.nsrr_token
+.env
+
 # Python cache & temporary directories
 __pycache__/
 *.py[cod]
@@ -11,10 +15,15 @@ __pycache__/
 .ipynb_checkpoints/
 .mplconfig/
 
-# Derived preprocessed NPZ cache (>50 MB per file; regenerated automatically in ~8s by Step 1 from data/raw/)
-data/processed/*.npz
+# Archived initial 10-subject test run (kept locally on disk, excluded from pipeline & GitHub)
+archive_10subj_initial_test/
 
-# Temporary dry-run test output (keep real training in results/notebook_ctx_false/ and results/notebook_ctx_true/)
+# Raw EDF/XML recordings & preprocessed NPZ waveforms (too large for GitHub; stored locally on training PC)
+# Note: data/splits/ IS tracked so cohort manifests & 10-fold CV splits stay synced across PCs
+data/raw/
+data/processed/
+
+# Temporary dry-run test output (all real training results in results/ ARE tracked & uploaded to GitHub)
 results/dry_run/
 
 # OS metadata
