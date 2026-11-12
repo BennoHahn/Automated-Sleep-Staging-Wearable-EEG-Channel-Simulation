@@ -17,6 +17,8 @@ import yaml
 
 # Ensure HTTPS downloads from sleepdata.org succeed even if the machine's local OpenSSL CA bundle is incomplete
 ssl._create_default_https_context = ssl._create_unverified_context
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
 import numpy as np
 import pandas as pd
 import matplotlib

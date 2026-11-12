@@ -17,6 +17,7 @@ Pipeline steps:
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 import logging
 from math import gcd
 import os
@@ -685,19 +686,22 @@ def resolve_nsrr_token(
 def _download_url_to_file(
     url: str,
     dest_path: Path,
-    max_retries: int = 3,
-    timeout: float = 120.0,
+    max_retries: int = 12,
+    timeout: float = 180.0,
 ) -> None:
-    """Download `url` to `dest_path` atomically via a `.part` temporary file with retries and SSL fallback."""
+    """Download `url` to `dest_path` atomically via a `.part` temporary file with resilient 503/429 backoff."""
     dest_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = dest_path.with_suffix(dest_path.suffix + ".part")
+    tmp_path = dest_path.with_suffix(dest_path.suffix + f".{threading.get_ident()}.part")
 
     last_err: Exception | None = None
     for attempt in range(1, max_retries + 1):
         try:
             req = urllib.request.Request(
                 url,
-                headers={"User-Agent": "nsrr-py/shhs-sleep-staging-pipeline"},
+                headers={
+                    "User-Agent": "nsrr-py/shhs-sleep-staging-pipeline",
+                    "Connection": "keep-alive",
+                },
             )
             ctx = _get_ssl_context(force_unverified=False)
             try:
@@ -719,12 +723,15 @@ def _download_url_to_file(
             if e.code in (401, 403, 404):
                 raise
             last_err = e
+            # For 503 Service Unavailable / 429 Too Many Requests, sleepdata.org needs a 10-60s cooldown
+            wait_sec = min(60.0, 5.0 * attempt) if e.code in (429, 500, 502, 503, 504) else (3.0 * attempt)
         except Exception as e:
             if tmp_path.exists():
                 tmp_path.unlink(missing_ok=True)
             last_err = e
+            wait_sec = min(45.0, 4.0 * attempt)
         if attempt < max_retries:
-            time.sleep(2.0 * attempt)
+            time.sleep(wait_sec)
     raise RuntimeError(f"Failed to download {url} after {max_retries} attempts: {last_err}")
 
 
@@ -746,10 +753,27 @@ def download_shhs_subject_from_nsrr(
 
     if not xml_path.exists() or xml_path.stat().st_size == 0:
         _download_url_to_file(xml_url, xml_path)
+        time.sleep(0.4)
     if not edf_path.exists() or edf_path.stat().st_size == 0:
         _download_url_to_file(edf_url, edf_path)
 
     return edf_path, xml_path
+
+
+def _preprocess_and_save_worker(
+    edf_path: Path,
+    xml_path: Path,
+    config: dict[str, Any],
+    proc_dir: Path,
+    delete_raw_edf: bool,
+) -> tuple[Path, int, list[str], float]:
+    """Background worker that filters, resamples, saves `.npz`, and deletes raw `.edf`."""
+    subj_data = preprocess_subject(edf_path, xml_path, config=config)
+    saved_path = save_preprocessed_subject(subj_data, proc_dir)
+    if delete_raw_edf and edf_path.exists():
+        edf_path.unlink(missing_ok=True)
+    size_mb = saved_path.stat().st_size / (1024 * 1024)
+    return saved_path, len(subj_data["labels"]), list(subj_data["channel_names"]), size_mb
 
 
 def download_and_preprocess_shhs_cohort(
@@ -761,14 +785,14 @@ def download_and_preprocess_shhs_cohort(
     delete_raw_edf: bool | None = None,
     verbose: bool = True,
 ) -> tuple[list[Path], list[str]]:
-    """Download (if needed) and preprocess the selected SHHS1 cohort one patient at a time.
+    """Download (if needed) and preprocess the selected SHHS1 cohort with pipelined CPU preprocessing.
 
     Workflow per patient (`subject_id`):
       1. If `data/processed/{subject_id}.npz` already exists and `overwrite=False`, reuse it immediately.
       2. Otherwise, check if `{subject_id}.edf` and `{subject_id}-profusion.xml` exist locally; if not,
-         download them from NSRR using the token (`nsrr_token`, `NSRR_TOKEN` env var, or `.nsrr_token` file).
-      3. Preprocess the configured channels (`[C4-A1, C3-A2, EOG(L), EOG(R)]`) at 100 Hz and save
-         `data/processed/{subject_id}.npz` in `float16` (`~23 MB` per subject).
+         download them politely (1 stream with 503 backoff) from NSRR using the token.
+      3. Dispatch CPU preprocessing (`[C4-A1, C3-A2, EOG(L), EOG(R)]` -> `float16` `.npz`) to a background
+         worker thread so the next subject's EDF download starts immediately without waiting on CPU filtering.
       4. Delete the raw `.edf` file (`~55 MB`) immediately after `.npz` is saved when
          `delete_raw_edf_after_preprocess` is enabled, keeping total disk usage around `~40 GB` for 1,771 subjects.
 
@@ -781,6 +805,13 @@ def download_and_preprocess_shhs_cohort(
 
     edf_dir = root_dir / paths_cfg.get("edf_dir", "data/raw/edf")
     ann_dir = root_dir / paths_cfg.get("annotation_dir", "data/raw/annotations-events-profusion")
+    local_shhs_edf_dir = Path(paths_cfg.get("local_shhs_edf_dir", "/data/shhs/polysomnography/edfs/shhs1"))
+    local_shhs_ann_dir = Path(
+        paths_cfg.get(
+            "local_shhs_annotation_dir",
+            "/data/shhs/polysomnography/annotations-events-profusion/shhs1",
+        )
+    )
     proc_dir = root_dir / paths_cfg.get("processed_dir", "data/processed")
     proc_dir.mkdir(parents=True, exist_ok=True)
 
@@ -791,6 +822,14 @@ def download_and_preprocess_shhs_cohort(
         delete_raw_edf = bool(prep_cfg.get("delete_raw_edf_after_preprocess", True))
 
     token = resolve_nsrr_token(nsrr_token=nsrr_token, root_dir=root_dir)
+    has_local_shhs_mount = local_shhs_edf_dir.exists()
+    n_workers = min(8, max(2, (os.cpu_count() or 4) // 2)) if has_local_shhs_mount else 2
+    if verbose and has_local_shhs_mount:
+        print(
+            f"  [Local SHHS1 Mirror Detected] Reading EDFs from {local_shhs_edf_dir} "
+            f"with {n_workers} parallel CPU workers!",
+            flush=True,
+        )
 
     saved_paths: list[Path] = []
     skipped_subjects: list[str] = []
@@ -799,82 +838,138 @@ def download_and_preprocess_shhs_cohort(
     n_newly_processed = 0
     t_cohort_start = time.time()
 
-    for idx, sid in enumerate(subject_ids, start=1):
-        out_path = proc_dir / f"{sid}.npz"
-        if out_path.exists() and not overwrite:
-            saved_paths.append(out_path)
-            n_cached += 1
-            continue
+    pending_futures: list[tuple[int, str, float, Future[tuple[Path, int, list[str], float]]]] = []
 
-        t_subj = time.time()
-        edf_path = edf_dir / f"{sid}.edf"
-        xml_path = ann_dir / f"{sid}-profusion.xml"
+    def _drain_completed(wait_all: bool = False) -> None:
+        nonlocal n_newly_processed
+        still_pending: list[tuple[int, str, float, Future[tuple[Path, int, list[str], float]]]] = []
+        for p_idx, p_sid, p_t0, fut in pending_futures:
+            if wait_all or fut.done():
+                try:
+                    saved_path, n_ep, ch_names, size_mb = fut.result()
+                    saved_paths.append(saved_path)
+                    n_newly_processed += 1
+                    if verbose and (
+                        n_newly_processed <= 10
+                        or n_newly_processed % 20 == 0
+                        or p_idx == n_total
+                    ):
+                        elapsed_subj = time.time() - p_t0
+                        total_elapsed = time.time() - t_cohort_start
+                        avg_per_new = total_elapsed / max(n_newly_processed, 1)
+                        remaining = max(0, n_total - p_idx)
+                        eta_min = (remaining * avg_per_new) / 60.0
+                        print(
+                            f"  [{p_idx:4d}/{n_total:4d}] {p_sid}: {n_ep} epochs, "
+                            f"channels={ch_names} -> {size_mb:.1f} MB ({elapsed_subj:.1f}s) "
+                            f"| cached={n_cached}, new={n_newly_processed}, skipped={len(skipped_subjects)} "
+                            f"| ETA ~{eta_min:.1f} min",
+                            flush=True,
+                        )
+                except Exception as e:
+                    logger.warning("Error preprocessing subject %s: %s; skipping.", p_sid, e)
+                    skipped_subjects.append(p_sid)
+                    if verbose:
+                        print(f"  [{p_idx:4d}/{n_total:4d}] {p_sid}: PREPROCESS ERROR ({e}) -> skipped.", flush=True)
+            else:
+                still_pending.append((p_idx, p_sid, p_t0, fut))
+        pending_futures[:] = still_pending
 
-        try:
-            if not (edf_path.exists() and xml_path.exists()):
-                if not token:
-                    raise RuntimeError(
-                        f"Raw EDF/XML for {sid} not found locally in {edf_dir} and no NSRR token was provided. "
-                        f"Save your NSRR token in '{root_dir / '.nsrr_token'}' or set `NSRR_TOKEN`."
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        for idx, sid in enumerate(subject_ids, start=1):
+            out_path = proc_dir / f"{sid}.npz"
+            if out_path.exists() and not overwrite:
+                saved_paths.append(out_path)
+                n_cached += 1
+                continue
+
+            _drain_completed(wait_all=False)
+            if len(pending_futures) >= n_workers * 2:
+                _drain_completed(wait_all=True)
+
+            t_subj = time.time()
+            # 1. Check shared local SHHS1 mirror (/data/shhs/...) first, then project data/raw/
+            shared_edf = local_shhs_edf_dir / f"{sid}.edf"
+            shared_xml = local_shhs_ann_dir / f"{sid}-profusion.xml"
+            local_edf = edf_dir / f"{sid}.edf"
+            local_xml = ann_dir / f"{sid}-profusion.xml"
+
+            edf_from_shared_mirror = False
+            if shared_edf.exists():
+                edf_path = shared_edf
+                edf_from_shared_mirror = True
+            else:
+                edf_path = local_edf
+
+            if shared_xml.exists():
+                xml_path = shared_xml
+            else:
+                xml_path = local_xml
+
+            try:
+                if not (edf_path.exists() and xml_path.exists()):
+                    if not token:
+                        if has_local_shhs_mount and not edf_path.exists():
+                            skipped_subjects.append(sid)
+                            continue
+                        raise RuntimeError(
+                            f"Raw EDF/XML for {sid} not found locally in {edf_dir} and no NSRR token was provided. "
+                            f"Save your NSRR token in '{root_dir / '.nsrr_token'}' or set `NSRR_TOKEN`."
+                        )
+                    dl_edf, dl_xml = download_shhs_subject_from_nsrr(
+                        subject_id=sid,
+                        edf_dir=edf_path.parent if edf_path.exists() else edf_dir,
+                        annotation_dir=xml_path.parent if xml_path.exists() else ann_dir,
+                        nsrr_token=token,
                     )
-                edf_path, xml_path = download_shhs_subject_from_nsrr(
-                    subject_id=sid,
-                    edf_dir=edf_dir,
-                    annotation_dir=ann_dir,
-                    nsrr_token=token,
+                    if not edf_path.exists():
+                        edf_path = dl_edf
+                        edf_from_shared_mirror = False
+                    if not xml_path.exists():
+                        xml_path = dl_xml
+
+                # NEVER delete EDF files from the shared /data/shhs mirror!
+                should_delete_edf = bool(delete_raw_edf and not edf_from_shared_mirror)
+
+                fut = pool.submit(
+                    _preprocess_and_save_worker,
+                    edf_path,
+                    xml_path,
+                    config,
+                    proc_dir,
+                    should_delete_edf,
                 )
-
-            subj_data = preprocess_subject(edf_path, xml_path, config=config)
-            saved_path = save_preprocessed_subject(subj_data, proc_dir)
-            saved_paths.append(saved_path)
-            n_newly_processed += 1
-
-            if delete_raw_edf and edf_path.exists():
-                edf_path.unlink(missing_ok=True)
-
-            if verbose and (
-                n_newly_processed <= 5
-                or n_newly_processed % 10 == 0
-                or idx == n_total
-            ):
-                elapsed_subj = time.time() - t_subj
-                total_elapsed = time.time() - t_cohort_start
-                avg_per_new = total_elapsed / max(n_newly_processed, 1)
-                remaining = max(0, n_total - idx)
-                eta_min = (remaining * avg_per_new) / 60.0
-                size_mb = saved_path.stat().st_size / (1024 * 1024)
-                print(
-                    f"  [{idx:4d}/{n_total:4d}] {sid}: {len(subj_data['labels'])} epochs, "
-                    f"channels={subj_data['channel_names']} -> {size_mb:.1f} MB ({elapsed_subj:.1f}s) "
-                    f"| cached={n_cached}, new={n_newly_processed}, skipped={len(skipped_subjects)} "
-                    f"| ETA ~{eta_min:.1f} min"
-                )
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                logger.warning("Subject %s not found on NSRR (HTTP 404); skipping.", sid)
+                pending_futures.append((idx, sid, t_subj, fut))
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    logger.warning("Subject %s not found on NSRR (HTTP 404); skipping.", sid)
+                    skipped_subjects.append(sid)
+                    if verbose:
+                        print(f"  [{idx:4d}/{n_total:4d}] {sid}: HTTP 404 (not available on NSRR) -> skipped.", flush=True)
+                elif e.code in (401, 403):
+                    raise RuntimeError(
+                        f"NSRR authentication failed (HTTP {e.code}) for {sid}. "
+                        f"Please check that your NSRR token in `.nsrr_token` is current and valid."
+                    ) from e
+                else:
+                    logger.warning("HTTP error %s for subject %s: %s; skipping.", e.code, sid, e)
+                    skipped_subjects.append(sid)
+            except Exception as e:
+                if "no NSRR token was provided" in str(e):
+                    raise
+                logger.warning("Error processing subject %s: %s; skipping.", sid, e)
                 skipped_subjects.append(sid)
                 if verbose:
-                    print(f"  [{idx:4d}/{n_total:4d}] {sid}: HTTP 404 (not available on NSRR) -> skipped.")
-            elif e.code in (401, 403):
-                raise RuntimeError(
-                    f"NSRR authentication failed (HTTP {e.code}) for {sid}. "
-                    f"Please check that your NSRR token in `.nsrr_token` is current and valid."
-                ) from e
-            else:
-                logger.warning("HTTP error %s for subject %s: %s; skipping.", e.code, sid, e)
-                skipped_subjects.append(sid)
-        except Exception as e:
-            if "no NSRR token was provided" in str(e):
-                raise
-            logger.warning("Error processing subject %s: %s; skipping.", sid, e)
-            skipped_subjects.append(sid)
-            if verbose:
-                print(f"  [{idx:4d}/{n_total:4d}] {sid}: ERROR ({e}) -> skipped.")
+                    print(f"  [{idx:4d}/{n_total:4d}] {sid}: ERROR ({e}) -> skipped.", flush=True)
 
+        _drain_completed(wait_all=True)
+
+    saved_paths.sort()
     if verbose:
         print(
             f"Cohort preprocessing summary: {len(saved_paths)}/{n_total} subjects ready "
-            f"(cached={n_cached}, newly_processed={n_newly_processed}, skipped={len(skipped_subjects)})."
+            f"(cached={n_cached}, newly_processed={n_newly_processed}, skipped={len(skipped_subjects)}).",
+            flush=True,
         )
     return saved_paths, skipped_subjects
 

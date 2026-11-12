@@ -4,6 +4,8 @@ paths:
   raw_dir: data/raw
   edf_dir: data/raw/edf
   annotation_dir: data/raw/annotations-events-profusion
+  local_shhs_edf_dir: /data/shhs/polysomnography/edfs/shhs1
+  local_shhs_annotation_dir: /data/shhs/polysomnography/annotations-events-profusion/shhs1
   processed_dir: data/processed
   splits_dir: data/splits
   results_dir: results
