@@ -369,6 +369,86 @@ class TinySleepNet(nn.Module):
         if load_classifier and "classifier_state_dict" in payload:
             self.classifier.load_state_dict(payload["classifier_state_dict"], strict=strict)
 
+    def summary(self, batch_size: int = 32, seq_len: int = 20) -> str:
+        """Print and return a Keras / torchinfo-style layer-by-layer architecture table."""
+        rows: list[tuple[str, str, str, int]] = []
+        fe = self.feature_extractor
+        n_ep = batch_size * seq_len if self.use_context else batch_size
+
+        with torch.no_grad():
+            x = torch.zeros(n_ep, self.in_channels, self.epoch_samples)
+            rows.append(("Input (Epoch Signal)", f"{tuple(x.shape)}", f"fs=100Hz, C={self.in_channels}", 0))
+
+            # Conv1 -> BN1 -> ReLU -> Pool1 -> Drop1
+            x = fe.conv1.conv(x)
+            p_conv1 = sum(p.numel() for p in fe.conv1.conv.parameters())
+            rows.append(("Conv1d_1 (SamePad)", f"{tuple(x.shape)}", f"k={fe.conv1.conv.kernel_size}, s={fe.conv1.conv.stride}", p_conv1))
+            x = fe.conv1.relu(fe.conv1.bn(x))
+            p_bn1 = sum(p.numel() for p in fe.conv1.bn.parameters())
+            rows.append(("BatchNorm1d_1 + ReLU", f"{tuple(x.shape)}", "128 channels", p_bn1))
+            x = fe.pool1(x)
+            rows.append(("MaxPool1d_1", f"{tuple(x.shape)}", f"k={fe.pool1.kernel_size}, s={fe.pool1.stride}", 0))
+            x = fe.drop1(x)
+            rows.append(("Dropout_1", f"{tuple(x.shape)}", f"p={fe.drop1.p}", 0))
+
+            # Conv2, Conv3, Conv4
+            for idx, blk in enumerate([fe.conv2, fe.conv3, fe.conv4], start=2):
+                x = blk.conv(x)
+                p_c = sum(p.numel() for p in blk.conv.parameters())
+                rows.append((f"Conv1d_{idx} (SamePad)", f"{tuple(x.shape)}", f"k={blk.conv.kernel_size}, s={blk.conv.stride}", p_c))
+                x = blk.relu(blk.bn(x))
+                p_b = sum(p.numel() for p in blk.bn.parameters())
+                rows.append((f"BatchNorm1d_{idx} + ReLU", f"{tuple(x.shape)}", "128 channels", p_b))
+
+            x = fe.pool2(x)
+            rows.append(("MaxPool1d_2", f"{tuple(x.shape)}", f"k={fe.pool2.kernel_size}, s={fe.pool2.stride}", 0))
+            x = fe.drop2(x)
+            rows.append(("Dropout_2", f"{tuple(x.shape)}", f"p={fe.drop2.p}", 0))
+            x = x.flatten(start_dim=1)
+            rows.append(("Flatten (CNN Feature f_t)", f"{tuple(x.shape)}", f"feat_dim={self.feat_dim}", 0))
+
+            if self.use_context and isinstance(self.classifier, SequentialLSTMHead):
+                x_seq = x.reshape(batch_size, seq_len, self.feat_dim)
+                rows.append(("Reshape to Sequence", f"{tuple(x_seq.shape)}", f"seq_len={seq_len} (10 min)", 0))
+                lstm_out, _ = self.classifier.lstm(x_seq)
+                p_lstm = sum(p.numel() for p in self.classifier.lstm.parameters())
+                rows.append(("LSTM (1-layer unidir.)", f"{tuple(lstm_out.shape)}", f"hidden={self.classifier.lstm.hidden_size}", p_lstm))
+                lstm_out = self.classifier.drop(lstm_out)
+                rows.append(("Dropout_3 (Classifier)", f"{tuple(lstm_out.shape)}", f"p={self.classifier.drop.p}", 0))
+                logits = self.classifier.fc(lstm_out)
+                p_fc = sum(p.numel() for p in self.classifier.fc.parameters())
+                rows.append(("Linear (5 AASM Stages)", f"{tuple(logits.shape)}", "Wake, N1, N2, N3, REM", p_fc))
+            else:
+                p_fc = sum(p.numel() for p in self.classifier.parameters())
+                logits = self.classifier(x)
+                rows.append(("Linear (5 AASM Stages)", f"{tuple(logits.shape)}", "Wake, N1, N2, N3, REM", p_fc))
+
+        total_params = sum(p.numel() for p in self.parameters())
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        cnn_params = sum(p.numel() for p in self.feature_extractor.parameters())
+        head_params = sum(p.numel() for p in self.classifier.parameters())
+
+        lines = [
+            "=" * 88,
+            f"TinySleepNet Architecture Summary (in_channels={self.in_channels}, use_context={self.use_context})",
+            "=" * 88,
+            f"{'Layer (type)':<28} {'Output Shape':<24} {'Config / Details':<22} {'Param #':>10}",
+            "-" * 88,
+        ]
+        for name, shape_str, details, n_p in rows:
+            lines.append(f"{name:<28} {shape_str:<24} {details:<22} {n_p:>10,}")
+        lines.extend([
+            "=" * 88,
+            f"Total params          : {total_params:,} ({total_params * 4 / (1024**2):.2f} MB in float32)",
+            f"  |- CNN Extractor    : {cnn_params:,} ({100.0 * cnn_params / total_params:.1f}%)",
+            f"  +- Classifier Head  : {head_params:,} ({100.0 * head_params / total_params:.1f}%)",
+            f"Trainable params      : {trainable_params:,}",
+            "=" * 88,
+        ])
+        out_str = "\n".join(lines)
+        print(out_str)
+        return out_str
+
 
 def build_tinysleepnet_from_config(
     config: dict[str, Any],

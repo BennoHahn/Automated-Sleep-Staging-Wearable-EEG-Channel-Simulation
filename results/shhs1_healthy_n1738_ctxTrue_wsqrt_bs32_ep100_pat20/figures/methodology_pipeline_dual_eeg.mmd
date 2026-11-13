@@ -1,0 +1,31 @@
+flowchart TD
+    classDef custom fill:#EFF6FF,stroke:#1D4ED8,stroke-width:2px,color:#1E3A8A
+    classDef tsn fill:#ECFDF5,stroke:#047857,stroke-width:2px,color:#065F46
+    classDef hybrid fill:#F5F3FF,stroke:#6D28D9,stroke-width:2px,color:#4C1D95
+    classDef result fill:#FFFBEB,stroke:#B45309,stroke-width:2px,color:#78350F
+
+    subgraph S1["Stage 1: Data Ingestion & Standardized Preprocessing (Custom Pipeline)"]
+        A["1. SHHS1 Cohort Filter (select_shhs_cohort)<br/>• 5,804 PSG Nights -> AHI < 5.0 & RDI < 5.0 (1,771 Healthy)<br/>• Require all 4 channels [C4-A1, C3-A2, EOG(L), EOG(R)]<br/>• Final Cohort: 1,738 Subjects (1,761,352 30s epochs)"]:::custom
+        B["2. Standardized DSP (preprocess_subject)<br/>• 60 Hz IIR Notch (Q=30) -> Resample to 100 Hz (3,000 samp/ep)<br/>• Zero-phase 5th-order Butterworth Bandpass (0.2 - 49.0 Hz)<br/>• R&K -> 5 AASM Stages (W, N1, N2, N3=S3+S4, REM)<br/>• Stored in physical uV (float16 .npz)"]:::custom
+        C["3. Montage Simulation & Normalization (apply_channel_config)<br/>• Select dual_eeg: C4-A1 + C3-A2 (C = 2)<br/>• Deferred uV bipolar subtraction (for wearable simulations)<br/>• Per-Subject, Per-Channel Z-Score Normalization"]:::custom
+        A --> B --> C
+    end
+
+    subgraph S2["Stage 2: 10-Fold Subject Split & Augmentation (Hybrid)"]
+        D["4. Subject-Independent 10-Fold CV (ensure_subject_cv_splits)<br/>• 80% Train (~1,390 subj) | 10% Val (~174 subj) | 10% Test (~174 subj)<br/>• Zero subject leakage across splits"]:::hybrid
+        E["5. Sequence Batching & GPU Augmentations (SleepStageDataset)<br/>• Contiguous Sequences: M = 20 epochs (10 min), Batch = 32<br/>• Random time shift (+-10% = +-300 samples)<br/>• Random sign flip (50% prob, x -> -x) & seq offset (0..5 ep)"]:::hybrid
+        C --> D --> E
+    end
+
+    subgraph S3["Stage 3: Multi-Channel TinySleepNet Architecture (PyTorch Re-Implementation)"]
+        F["6. CNN Frequency Filter Bank (Conv1d_1)<br/>• Input: (640, 2, 3000) [Early Fusion]<br/>• 128 filters, k=50 (0.5s), s=6, SAME + BN + ReLU<br/>• MaxPool1d(k=8, s=8) + Dropout(0.5) -> (640, 128, 62)"]:::tsn
+        G["7. CNN Temporal Representation (Conv1d_2..4)<br/>• 3x [128 filters, k=8, s=1, SAME + BN + ReLU]<br/>• MaxPool1d(k=4, s=4) + Dropout(0.5) + Flatten<br/>• Epoch Embedding f_t: (640, 1920) | 407,040 params"]:::tsn
+        H["8. Sequential Context Head (SequentialLSTMHead)<br/>• Reshape to (32, 20, 1920)<br/>• 1-Layer Unidirectional LSTM (hidden = 128)<br/>• Dropout(0.5) + Linear(128 -> 5) -> Logits (32, 20, 5)"]:::tsn
+        E --> F --> G --> H
+    end
+
+    subgraph S4["Stage 4: Optimization & Two-Tier Clinical Evaluation"]
+        I["9. Loss & Optimization (train_one_fold)<br/>• Sqrt Inverse-Frequency Class Weights (solves N1 3.4% imbalance)<br/>• Adam (lr=1e-4, wd=1e-3, grad_clip=5.0), bfloat16 AMP<br/>• Early Stopping on val_macro_f1 (patience=20, max_epochs=100)"]:::hybrid
+        J["10. Achieved 10-Fold CV Results (N = 1,738 Subjects)<br/>• Epoch Metrics: ACC = 84.8% +- 0.5% | Kappa = 0.792 | MCC = 0.793 | Macro-F1 = 78.5%<br/>• Stage F1: Wake 92.7% | REM 85.8% | N2 84.9% | N3 79.3% | N1 50.1%<br/>• Clinical Bland-Altman: TST Bias +5.6m (r=0.926) | SE% Bias +1.1% (r=0.917)"]:::result
+        H --> I --> J
+    end
