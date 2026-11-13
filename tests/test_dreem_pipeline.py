@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import zipfile
 
 import h5py
 import numpy as np
@@ -28,11 +29,13 @@ from src.data.dreem import (
     DODO_ONLY_EEG_CHANNELS,
     DREEM_ALL_EEG_CHANNELS,
     DREEM_SHARED_EEG_CHANNELS,
+    _resolve_zenodo_download_url,
     discover_dreem_h5_files,
     ensure_dreem_cv_splits,
     filter_splits_for_subjects,
     preprocess_all_dreem_recordings,
     preprocess_dreem_subject,
+    read_dreem_h5_recording,
 )
 from src.training.trainer import get_experiment_results_dir
 
@@ -224,6 +227,64 @@ class TestDreemPipeline(unittest.TestCase):
         )
         _, summary_df = run_dreem_pipeline(args)
         self.assertEqual(set(summary_df["Config"]), {"dod_f3_f4", "dodh_fp1_f3", "dodo_o1_m2"})
+
+    def test_ignores_macos_sidecars_extracts_local_zip_and_explains_invalid_h5(self) -> None:
+        dodh_chs = (*DREEM_SHARED_EEG_CHANNELS, *DODH_ONLY_EEG_CHANNELS)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = root / "raw"
+            raw.mkdir(parents=True, exist_ok=True)
+            real_h5_src = root / "tmp_real.h5"
+            _write_synthetic_h5(real_h5_src, dodh_chs, n_epochs=8, seed=21)
+
+            # Package real .h5 + macOS __MACOSX / ._* AppleDouble junk inside dodh.zip
+            zip_path = raw / "dodh.zip"
+            with zipfile.ZipFile(zip_path, "w") as zf:
+                zf.write(real_h5_src, arcname="dodh/subj01.h5")
+                zf.writestr("dodh/._subj01.h5", b"\x00\x05\x16\x07mac-appledouble")
+                zf.writestr("__MACOSX/dodh/._subj01.h5", b"\x00\x05\x16\x07mac-appledouble")
+
+            cfg = {
+                **self.dreem_cfg,
+                "paths": {
+                    **self.dreem_cfg["paths"],
+                    "raw_dir": str(raw),
+                    "dodh_dir": str(raw / "dod-h"),
+                    "dodo_dir": str(raw / "dod-o"),
+                    "processed_dir": str(root / "processed"),
+                },
+            }
+            saved = preprocess_all_dreem_recordings(cfg, verbose=False)
+            self.assertEqual(len(saved), 1)
+            self.assertEqual(saved[0].name, "dodh_subj01.npz")
+            self.assertFalse((raw / "dod-h" / "._subj01.h5").exists())
+
+            # Fake non-AppleDouble non-HDF5 .h5 file must raise a contextual error
+            bad_h5 = raw / "dod-h" / "corrupt_json.h5"
+            bad_h5.write_bytes(b'{"id": "15900394", "key": "dodh.zip"}')
+            with self.assertRaises(OSError) as ctx:
+                preprocess_all_dreem_recordings(cfg, verbose=False)
+            self.assertIn("corrupt_json.h5", str(ctx.exception))
+            self.assertIn("JSON API metadata", str(ctx.exception))
+
+            with self.assertRaises(OSError) as read_ctx:
+                read_dreem_h5_recording(bad_h5)
+            self.assertIn("corrupt_json.h5", str(read_ctx.exception))
+
+    def test_zenodo_url_prefers_content_over_bare_self_metadata(self) -> None:
+        url1 = _resolve_zenodo_download_url(
+            {"links": {"self": "https://zenodo.org/api/records/15900394/files/dodh.zip", "content": "https://zenodo.org/api/records/15900394/files/dodh.zip/content"}},
+            "15900394",
+            "dodh.zip",
+        )
+        self.assertEqual(url1, "https://zenodo.org/api/records/15900394/files/dodh.zip/content")
+
+        url2 = _resolve_zenodo_download_url(
+            {"links": {"self": "https://zenodo.org/api/records/15900394/files/dodh.zip"}},
+            "15900394",
+            "dodh.zip",
+        )
+        self.assertEqual(url2, "https://zenodo.org/api/records/15900394/files/dodh.zip/content")
 
 
 if __name__ == "__main__":

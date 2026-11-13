@@ -42,9 +42,12 @@ from src.data.dreem import (
     DODH_ONLY_EEG_CHANNELS,
     DODO_ONLY_EEG_CHANNELS,
     DREEM_SHARED_EEG_CHANNELS,
+    _format_invalid_h5_error,
+    _is_ignored_h5_artifact,
     download_dreem_zenodo,
     ensure_dreem_cv_splits,
     filter_splits_for_subjects,
+    inspect_dreem_raw_files,
     preprocess_all_dreem_recordings,
 )
 from src.evaluation.clinical_sleep import (
@@ -324,7 +327,10 @@ def run_dreem_pipeline(args: argparse.Namespace) -> tuple[Path, pd.DataFrame]:
     raw_real = PROJECT_ROOT / base_cfg.get("paths", {}).get("raw_dir", "data/raw/dreem")
     proc_real = PROJECT_ROOT / base_cfg.get("paths", {}).get("processed_dir", "data/processed/dreem_dod")
     has_real_proc = proc_real.exists() and any(proc_real.glob("*.npz"))
-    has_real_raw = raw_real.exists() and any(raw_real.rglob("*.h5"))
+    has_real_raw = raw_real.exists() and (
+        any(not _is_ignored_h5_artifact(p) for p in raw_real.rglob("*.h5"))
+        or any(raw_real.glob("*.zip"))
+    )
 
     temp_ctx: tempfile.TemporaryDirectory[str] | None = None
     if args.dry_run and not args.download and not has_real_proc and not has_real_raw:
@@ -368,7 +374,28 @@ def run_dreem_pipeline(args: argparse.Namespace) -> tuple[Path, pd.DataFrame]:
                 raw_dir=raw_dir,
                 record_id=str(base_cfg.get("dataset", {}).get("zenodo_record_id", "15900394")),
                 cohorts=tuple(base_cfg.get("dataset", {}).get("cohorts", ["dod-h", "dod-o"])),
+                force=getattr(args, "force_download", False),
             )
+
+        if getattr(args, "check_raw", False):
+            report = inspect_dreem_raw_files(
+                raw_dir=raw_dir,
+                dodh_dir=raw_dir / "dod-h",
+                dodo_dir=raw_dir / "dod-o",
+                excluded_subjects=base_cfg.get("dataset", {}).get("excluded_subjects"),
+            )
+            valid = report["valid_entries"]
+            n_h = sum(1 for e in valid if e["cohort"] == "dod-h")
+            n_o = sum(1 for e in valid if e["cohort"] == "dod-o")
+            print(
+                f"[Check Raw] valid_hdf5={len(valid)} (dod-h={n_h}, dod-o={n_o}), "
+                f"invalid={len(report['invalid_files'])}, "
+                f"appledouble_sidecars_skipped={report['sidecars_skipped']}"
+            )
+            if report["invalid_files"]:
+                total = len(valid) + len(report["invalid_files"])
+                print(_format_invalid_h5_error(report["invalid_files"], total, raw_dir))
+            return raw_dir, pd.DataFrame()
 
         prep_needed = args.preprocess_only or args.overwrite_prep or not (
             processed_dir.exists() and any(processed_dir.glob("*.npz"))
@@ -540,6 +567,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--download",
         action="store_true",
         help="Download and extract DOD-H and DOD-O .h5 files from Zenodo record 15900394.",
+    )
+    parser.add_argument(
+        "--force-download",
+        action="store_true",
+        help="Re-download DOD-H and DOD-O archives even if local files exist.",
+    )
+    parser.add_argument(
+        "--check-raw",
+        action="store_true",
+        help="Inspect data/raw/dreem .h5 files for valid HDF5 headers and exit.",
     )
     parser.add_argument(
         "--preprocess-only",

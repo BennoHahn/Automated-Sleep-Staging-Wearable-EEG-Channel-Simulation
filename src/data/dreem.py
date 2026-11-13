@@ -13,6 +13,8 @@ import json
 from pathlib import Path
 import tarfile
 from typing import Any
+import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 
@@ -80,10 +82,128 @@ def _decode_attr(val: Any) -> Any:
 
 
 def _normalize_channel_key(raw_key: str) -> str:
-    """Map Dreem HDF5 channel keys (e.g. `C3_M2`, `Fp1_F3`) to canonical names (`C3-M2`, `FP1-F3`)."""
+    """Map Dreem HDF5 channel keys (e.g. `C3_M2`, `Fp1_F3`, `EEG C3_M2`) to canonical names."""
     cleaned = str(raw_key).strip().split("/")[-1]
+    upper = cleaned.upper()
+    for prefix in ("EEG ", "EEG_", "EEG-"):
+        if upper.startswith(prefix):
+            cleaned = cleaned[len(prefix) :]
+            break
     lookup = cleaned.upper().replace("_", "-")
     return _CANONICAL_CHANNEL_MAP.get(lookup, cleaned.replace("_", "-"))
+
+
+_IGNORED_DIR_NAMES: frozenset[str] = frozenset({"__macosx", "_archives", "_extract_tmp"})
+
+
+def _is_ignored_h5_artifact(h5_path: Path, base_dir: Path | None = None) -> bool:
+    """Return True for macOS AppleDouble sidecars (`._*.h5`), dotfiles, and staging/archive dirs."""
+    if h5_path.name.startswith("."):
+        return True
+    rel = h5_path.relative_to(base_dir) if base_dir is not None else h5_path
+    return any(part.lower() in _IGNORED_DIR_NAMES for part in rel.parts[:-1])
+
+
+def _read_file_header(path: Path, n_bytes: int = 160) -> tuple[int, bytes]:
+    size = path.stat().st_size
+    with open(path, "rb") as f:
+        header = f.read(n_bytes)
+    return size, header
+
+
+def _classify_non_hdf5_file(size: int, header: bytes) -> str:
+    if size == 0 or not header:
+        return "empty (0 bytes)"
+    if header.startswith(b"\x00\x05\x16\x07"):
+        return "macOS AppleDouble sidecar metadata"
+    if header.startswith(b"PK\x03\x04"):
+        return "ZIP archive saved with .h5 extension"
+    stripped = header.lstrip()
+    if stripped.startswith((b"{", b"[")):
+        return "JSON API metadata (likely Zenodo links.self instead of /content)"
+    low = header.lower()
+    if b"<error" in low or b"accessdenied" in low:
+        return "XML error response (likely expired S3/HTTP AccessDenied)"
+    if b"<!doctype" in low or b"<html" in low or b"cloudflare" in low:
+        return "HTML web/challenge page (blocked automated download)"
+    if header.startswith(b"version https://git-lfs"):
+        return "Git LFS pointer text file"
+    return "corrupted or unrecognized binary header"
+
+
+def _is_valid_hdf5_file(h5_path: Path) -> bool:
+    if not h5_path.is_file() or h5_path.stat().st_size < 64:
+        return False
+    try:
+        return bool(h5py.is_hdf5(str(h5_path)))
+    except Exception:
+        return False
+
+
+def inspect_dreem_raw_files(
+    raw_dir: str | Path,
+    dodh_dir: str | Path | None = None,
+    dodo_dir: str | Path | None = None,
+    excluded_subjects: set[str] | frozenset[str] | list[str] | None = None,
+) -> dict[str, Any]:
+    """Validate discovered `.h5` files and classify any non-HDF5 or sidecar artifacts."""
+    entries = discover_dreem_h5_files(
+        raw_dir=raw_dir,
+        dodh_dir=dodh_dir,
+        dodo_dir=dodo_dir,
+        excluded_subjects=excluded_subjects,
+    )
+    valid_entries: list[dict[str, Any]] = []
+    invalid_files: list[dict[str, Any]] = []
+    sidecars_skipped = 0
+
+    for entry in entries:
+        h5_path = Path(entry["h5_path"])
+        if _is_valid_hdf5_file(h5_path):
+            valid_entries.append(entry)
+            continue
+        size, header = _read_file_header(h5_path)
+        kind = _classify_non_hdf5_file(size, header)
+        if kind == "macOS AppleDouble sidecar metadata":
+            sidecars_skipped += 1
+            continue
+        invalid_files.append(
+            {
+                "path": h5_path,
+                "cohort": entry["cohort"],
+                "size_bytes": size,
+                "kind": kind,
+                "preview": repr(header[:80]),
+            }
+        )
+
+    return {
+        "valid_entries": valid_entries,
+        "invalid_files": invalid_files,
+        "sidecars_skipped": sidecars_skipped,
+    }
+
+
+def _format_invalid_h5_error(
+    invalid_files: list[dict[str, Any]],
+    total_checked: int,
+    raw_dir: str | Path,
+) -> str:
+    lines = [
+        f"Found {len(invalid_files)}/{total_checked} invalid non-HDF5 .h5 file(s) under {raw_dir}:"
+    ]
+    for item in invalid_files[:5]:
+        lines.append(
+            f"  - {item['path']} ({item['size_bytes']} bytes, detected={item['kind']}, header={item['preview']})"
+        )
+    if len(invalid_files) > 5:
+        lines.append(f"  ... and {len(invalid_files) - 5} more invalid file(s).")
+    lines.append(
+        "Fix: delete corrupted .h5 files and either re-run with `--download --force-download` "
+        "or manually download DOD-H / DOD-O `.zip` archives from https://zenodo.org/records/15900394 "
+        f"into {raw_dir} (the pipeline auto-extracts them cleanly)."
+    )
+    return "\n".join(lines)
 
 
 def _infer_cohort_from_path(h5_path: Path) -> str | None:
@@ -140,6 +260,8 @@ def discover_dreem_h5_files(
     entries: list[dict[str, Any]] = []
     for root, default_cohort in search_roots:
         for h5_path in sorted(root.rglob("*.h5")):
+            if _is_ignored_h5_artifact(h5_path, base_dir=root):
+                continue
             resolved = h5_path.resolve()
             if resolved in seen_paths or _is_excluded_subject(h5_path, excluded):
                 continue
@@ -213,11 +335,28 @@ def read_dreem_h5_recording(
     default_fs: float = 250.0,
 ) -> tuple[dict[str, np.ndarray], dict[str, float], np.ndarray | None, str]:
     """Read EEG channels, sampling frequencies, and consensus hypnogram from a Dreem `.h5` file."""
+    path = Path(h5_path)
+    if not _is_valid_hdf5_file(path):
+        size, header = _read_file_header(path) if path.exists() else (0, b"")
+        kind = _classify_non_hdf5_file(size, header)
+        raise OSError(
+            f"Invalid HDF5 file '{path}' ({size} bytes, detected={kind}, header={header[:80]!r})."
+        )
+
     wanted = set(target_channels) if target_channels is not None else None
     signals: dict[str, np.ndarray] = {}
     fs_map: dict[str, float] = {}
 
-    with h5py.File(h5_path, "r") as f:
+    try:
+        h5_ctx = h5py.File(path, "r")
+    except OSError as exc:
+        size, header = _read_file_header(path) if path.exists() else (0, b"")
+        kind = _classify_non_hdf5_file(size, header)
+        raise OSError(
+            f"Failed to open HDF5 file '{path}' ({size} bytes, {kind}): {exc}"
+        ) from exc
+
+    with h5_ctx as f:
         hypnogram = _extract_h5_hypnogram(f)
         root_fs = _read_attr_float(f, ("fs", "sampling_rate", "frequency", "sfreq"))
         root_unit = _read_attr_unit(f)
@@ -420,16 +559,35 @@ def preprocess_all_dreem_recordings(
     storage_dtype = str(prep.get("storage_dtype", "float32"))
     compressed = bool(prep.get("compressed", False))
 
-    entries = discover_dreem_h5_files(
+    raw_root = Path(raw_dir)
+    if raw_root.exists():
+        extract_local_dreem_archives(
+            raw_dir=raw_root,
+            dodh_dir=dodh_dir,
+            dodo_dir=dodo_dir,
+            verbose=verbose,
+        )
+
+    inspection = inspect_dreem_raw_files(
         raw_dir=raw_dir,
         dodh_dir=dodh_dir,
         dodo_dir=dodo_dir,
         excluded_subjects=excluded,
     )
+    if inspection["sidecars_skipped"] and verbose:
+        print(
+            f"  [Dreem Prep] Ignored {inspection['sidecars_skipped']} macOS AppleDouble sidecar file(s)."
+        )
+    if inspection["invalid_files"]:
+        total = len(inspection["valid_entries"]) + len(inspection["invalid_files"])
+        raise OSError(_format_invalid_h5_error(inspection["invalid_files"], total, raw_dir))
+
+    entries = inspection["valid_entries"]
     if not entries:
         raise FileNotFoundError(
-            f"No Dreem DOD .h5 files found under {raw_dir}. "
-            "Download DOD-H and DOD-O from Zenodo record 15900394 or pass --download."
+            f"No valid Dreem DOD .h5 files found under {raw_dir}. "
+            "Download DOD-H and DOD-O from https://zenodo.org/records/15900394 "
+            "or pass --download."
         )
 
     if limit is not None and limit < len(entries):
@@ -438,6 +596,7 @@ def preprocess_all_dreem_recordings(
     saved_paths: list[Path] = []
     n_skipped_existing = 0
     n_skipped_unscored = 0
+    logged_cohorts: set[str] = set()
 
     for entry in entries:
         sid = entry["subject_id"]
@@ -458,6 +617,13 @@ def preprocess_all_dreem_recordings(
             if verbose:
                 print(f"  [Dreem Prep] Skipped unscored/empty file: {entry['h5_path'].name}")
             continue
+
+        if verbose and entry["cohort"] not in logged_cohorts:
+            logged_cohorts.add(entry["cohort"])
+            print(
+                f"  [Dreem Prep] First {entry['cohort']} channels extracted: "
+                f"{subj_dict['channel_names']}"
+            )
 
         saved = save_preprocessed_subject(
             subj_dict,
@@ -491,8 +657,33 @@ def _match_cohort_for_filename(filename: str) -> str | None:
     return None
 
 
+def _cohort_has_valid_h5(cohort_dir: Path) -> bool:
+    if not cohort_dir.exists():
+        return False
+    return any(
+        not _is_ignored_h5_artifact(p, base_dir=cohort_dir) and _is_valid_hdf5_file(p)
+        for p in cohort_dir.rglob("*.h5")
+    )
+
+
+def _validate_archive_file(archive_path: Path) -> None:
+    lower = archive_path.name.lower()
+    is_valid = (
+        zipfile.is_zipfile(archive_path)
+        if lower.endswith(".zip")
+        else tarfile.is_tarfile(archive_path)
+    )
+    if not is_valid:
+        size, header = _read_file_header(archive_path)
+        kind = _classify_non_hdf5_file(size, header)
+        raise OSError(
+            f"Invalid archive '{archive_path}' ({size} bytes, detected={kind}, header={header[:80]!r})."
+        )
+
+
 def _extract_archive_into_cohort_dir(archive_path: Path, cohort_dir: Path) -> int:
-    """Extract `.zip` or `.tar*` archive and move `.h5` files cleanly into `cohort_dir`."""
+    """Extract `.zip` or `.tar*` archive and move valid `.h5` files cleanly into `cohort_dir`."""
+    _validate_archive_file(archive_path)
     cohort_dir.mkdir(parents=True, exist_ok=True)
     tmp_extract = cohort_dir / "_extract_tmp"
     tmp_extract.mkdir(parents=True, exist_ok=True)
@@ -500,22 +691,33 @@ def _extract_archive_into_cohort_dir(archive_path: Path, cohort_dir: Path) -> in
     lower = archive_path.name.lower()
     if lower.endswith(".zip"):
         with zipfile.ZipFile(archive_path, "r") as zf:
-            zf.extractall(tmp_extract)
+            members = [
+                m
+                for m in zf.infolist()
+                if not m.is_dir() and not _is_ignored_h5_artifact(Path(m.filename))
+            ]
+            for member in members:
+                zf.extract(member, tmp_extract)
     elif lower.endswith((".tar.gz", ".tgz", ".tar")):
         with tarfile.open(archive_path, "r:*") as tf:
-            tf.extractall(tmp_extract)
+            members = [
+                m
+                for m in tf.getmembers()
+                if not _is_ignored_h5_artifact(Path(m.name))
+            ]
+            tf.extractall(tmp_extract, members=members)
     else:
         raise ValueError(f"Unsupported Dreem archive format: {archive_path}")
 
     moved = 0
     for h5_file in tmp_extract.rglob("*.h5"):
+        if _is_ignored_h5_artifact(h5_file, base_dir=tmp_extract):
+            continue
         dest = cohort_dir / h5_file.name
-        if not dest.exists():
-            h5_file.replace(dest)
-            moved += 1
-        else:
-            h5_file.unlink()
-            moved += 1
+        if dest.exists():
+            dest.unlink()
+        h5_file.replace(dest)
+        moved += 1
 
     # Clean empty staging folders
     for sub in sorted(tmp_extract.rglob("*"), reverse=True):
@@ -533,6 +735,61 @@ def _extract_archive_into_cohort_dir(archive_path: Path, cohort_dir: Path) -> in
     return moved
 
 
+def extract_local_dreem_archives(
+    raw_dir: str | Path,
+    dodh_dir: str | Path | None = None,
+    dodo_dir: str | Path | None = None,
+    verbose: bool = True,
+) -> int:
+    """Extract manually downloaded `dodh`/`dodo` `.zip` or `.tar.gz` archives if cohorts lack `.h5` files."""
+    raw_root = Path(raw_dir)
+    if not raw_root.exists():
+        return 0
+    cohort_targets = {
+        "dod-h": Path(dodh_dir) if dodh_dir is not None else raw_root / "dod-h",
+        "dod-o": Path(dodo_dir) if dodo_dir is not None else raw_root / "dod-o",
+    }
+    archive_candidates = (
+        list(raw_root.glob("*.zip"))
+        + list(raw_root.glob("*.tar.gz"))
+        + list(raw_root.glob("*.tgz"))
+        + list(raw_root.glob("*.tar"))
+    )
+    archives_dir = raw_root / "_archives"
+    if archives_dir.exists():
+        archive_candidates.extend(archives_dir.glob("*.zip"))
+        archive_candidates.extend(archives_dir.glob("*.tar.gz"))
+
+    extracted_total = 0
+    for arch in sorted(set(archive_candidates)):
+        cohort = _match_cohort_for_filename(arch.name)
+        if cohort not in cohort_targets:
+            continue
+        target_dir = cohort_targets[cohort]
+        if _cohort_has_valid_h5(target_dir):
+            continue
+        if verbose:
+            print(f"  [Dreem Prep] Extracting local archive {arch.name} -> {target_dir}", flush=True)
+        extracted_total += _extract_archive_into_cohort_dir(arch, target_dir)
+    return extracted_total
+
+
+def _resolve_zenodo_download_url(
+    entry: dict[str, Any],
+    record_id: str,
+    fname: str,
+) -> str:
+    links = entry.get("links", {}) or {}
+    content_url = links.get("content")
+    if content_url:
+        return str(content_url)
+    self_url = str(links.get("self") or "")
+    if self_url.rstrip("/").endswith("/content"):
+        return self_url
+    encoded = urllib.parse.quote(fname, safe="")
+    return f"https://zenodo.org/api/records/{record_id}/files/{encoded}/content"
+
+
 def download_dreem_zenodo(
     raw_dir: str | Path = "data/raw/dreem",
     record_id: str = ZENODO_RECORD_ID,
@@ -546,19 +803,37 @@ def download_dreem_zenodo(
     wanted_cohorts = set(cohorts)
     cohort_dirs: dict[str, Path] = {c: raw_root / c for c in wanted_cohorts}
 
-    # Fast skip if .h5 files already exist for all requested cohorts
-    if not force and all(
-        cdir.exists() and any(cdir.rglob("*.h5")) for cdir in cohort_dirs.values()
-    ):
+    if not force:
+        extract_local_dreem_archives(
+            raw_dir=raw_root,
+            dodh_dir=cohort_dirs.get("dod-h"),
+            dodo_dir=cohort_dirs.get("dod-o"),
+            verbose=verbose,
+        )
+
+    # Fast skip only if valid non-corrupt HDF5 files already exist for all requested cohorts
+    if not force and all(_cohort_has_valid_h5(cdir) for cdir in cohort_dirs.values()):
         if verbose:
-            counts = {c: len(list(cdir.rglob("*.h5"))) for c, cdir in cohort_dirs.items()}
-            print(f"  [Dreem Download] Existing .h5 files found: {counts}. Skipping download.")
+            counts = {
+                c: sum(1 for p in cdir.rglob("*.h5") if not _is_ignored_h5_artifact(p))
+                for c, cdir in cohort_dirs.items()
+            }
+            print(f"  [Dreem Download] Valid .h5 files found: {counts}. Skipping download.")
         return cohort_dirs
 
     api_url = f"https://zenodo.org/api/records/{record_id}"
     req = urllib.request.Request(api_url, headers={"User-Agent": "SleepStageReducedSensors/1.0"})
-    with urllib.request.urlopen(req, timeout=60.0) as resp:
-        metadata = json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=60.0) as resp:
+            metadata = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 403:
+            raise RuntimeError(
+                f"Zenodo returned HTTP 403 Forbidden for {api_url} (automated API requests may be blocked by CDN/WAF). "
+                f"Please download the DOD-H and DOD-O zip files via your browser from https://zenodo.org/records/{record_id} "
+                f"and place them into '{raw_root}' (auto-extracted on next run)."
+            ) from exc
+        raise
 
     files = metadata.get("files", [])
     if not files:
@@ -573,15 +848,12 @@ def download_dreem_zenodo(
         if cohort not in wanted_cohorts:
             continue
         cdir = cohort_dirs[cohort]
-        if not force and cdir.exists() and any(cdir.rglob("*.h5")):
+        if not force and _cohort_has_valid_h5(cdir):
             if verbose:
                 print(f"  [Dreem Download] {cohort} already populated in {cdir}; skipping {fname}.")
             continue
 
-        download_url = (
-            entry.get("links", {}).get("self")
-            or f"https://zenodo.org/api/records/{record_id}/files/{fname}/content"
-        )
+        download_url = _resolve_zenodo_download_url(entry, record_id, fname)
         lower_name = fname.lower()
         if lower_name.endswith(".h5"):
             dest = cdir / Path(fname).name
@@ -589,6 +861,13 @@ def download_dreem_zenodo(
             if verbose:
                 print(f"  [Dreem Download] Fetching {fname} -> {dest}", flush=True)
             _download_url_to_file(download_url, dest)
+            if not _is_valid_hdf5_file(dest):
+                size, header = _read_file_header(dest)
+                kind = _classify_non_hdf5_file(size, header)
+                dest.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"Downloaded file '{fname}' is not valid HDF5 ({size} bytes, detected={kind}, header={header[:80]!r})."
+                )
         else:
             archive_dest = archives_dir / Path(fname).name
             if verbose:
@@ -598,7 +877,11 @@ def download_dreem_zenodo(
                     flush=True,
                 )
             _download_url_to_file(download_url, archive_dest)
-            n_h5 = _extract_archive_into_cohort_dir(archive_dest, cdir)
+            try:
+                n_h5 = _extract_archive_into_cohort_dir(archive_dest, cdir)
+            except Exception:
+                archive_dest.unlink(missing_ok=True)
+                raise
             if verbose:
                 print(f"  [Dreem Download] Extracted {n_h5} .h5 files into {cdir}", flush=True)
 
