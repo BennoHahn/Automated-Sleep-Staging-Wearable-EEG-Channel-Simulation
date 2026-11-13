@@ -297,6 +297,12 @@ def load_subject_records_from_dir(
     processed_dir: str | Path,
     subject_ids: list[str] | None = None,
     lazy: bool | None = None,
+    required_channels: set[str] | list[str] | tuple[str, ...] | None = (
+        "C4-A1",
+        "C3-A2",
+        "EOG(L)",
+        "EOG(R)",
+    ),
 ) -> list[dict[str, Any]]:
     """Load preprocessed `.npz` subject records from `processed_dir`.
 
@@ -308,6 +314,9 @@ def load_subject_records_from_dir(
             loading to `apply_channel_config`. If `None` (default), automatically enables
             `lazy=True` when `> 50` subjects are present so large cohorts (`1,771` subjects)
             consume `< 15 MB` RAM instead of `> 40 GB`.
+        required_channels: Optional collection of canonical channel names every retained subject
+            must contain. Defaults to the 4 standard SHHS1 channels for backward compatibility;
+            pass `None` or `()` to retain all subjects and filter per channel config later.
     """
     processed_dir = Path(processed_dir)
     if subject_ids is None:
@@ -327,8 +336,11 @@ def load_subject_records_from_dir(
         if lazy
         else [load_preprocessed_subject(p) for p in npz_files]
     )
-    req = {"C4-A1", "C3-A2", "EOG(L)", "EOG(R)"}
+    if not required_channels:
+        return records
+    req = set(required_channels)
     valid = [r for r in records if req.issubset(set(r.get("channel_names", [])))]
     if len(valid) < len(records):
-        print(f"  [Cohort Channel Filter] Excluded {len(records) - len(valid)}/{len(records)} subjects missing C3-A2 -> {len(valid)} complete 4-channel subjects retained.", flush=True)
+        req_str = ", ".join(sorted(req))
+        print(f"  [Cohort Channel Filter] Excluded {len(records) - len(valid)}/{len(records)} subjects missing required channels ({req_str}) -> {len(valid)} complete subjects retained.", flush=True)
     return valid

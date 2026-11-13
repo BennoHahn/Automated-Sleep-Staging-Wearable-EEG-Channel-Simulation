@@ -554,7 +554,13 @@ def get_experiment_results_dir(
     if min_h > 0:
         cohort_tag += f"_h{min_h:g}"
 
-    run_folder = f"shhs1_{cohort_tag}_n{n_subjects}_ctx{ctx}_w{cw}_bs{bs}_ep{ep}_pat{pat}"
+    raw_ds_name = str(base_config.get("dataset", {}).get("name", "shhs")).strip().lower()
+    dataset_tag = (
+        "shhs1"
+        if raw_ds_name in {"", "shhs", "shhs1"}
+        else "".join(c if c.isalnum() or c in {"-", "_"} else "_" for c in raw_ds_name)
+    )
+    run_folder = f"{dataset_tag}_{cohort_tag}_n{n_subjects}_ctx{ctx}_w{cw}_bs{bs}_ep{ep}_pat{pat}"
     return base_results / run_folder
 
 

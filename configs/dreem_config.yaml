@@ -1,0 +1,108 @@
+# Base Configuration for Dreem Open Datasets (DOD-H + DOD-O) Singular EEG Pipeline
+
+seed: 42
+
+paths:
+  raw_dir: "data/raw/dreem"
+  dodh_dir: "data/raw/dreem/dod-h"
+  dodo_dir: "data/raw/dreem/dod-o"
+  processed_dir: "data/processed/dreem_dod"
+  splits_dir: "data/splits"
+  splits_filename: "dreem_dod_10fold_splits.json"
+  results_dir: "results"
+  ablation_config: "configs/ablation_channels.yaml"
+
+dataset:
+  name: "dreem_dod"
+  zenodo_record_id: "15900394"
+  cohorts: ["dod-h", "dod-o"]
+  mains_freq_hz: null  # Resolved per cohort: dod-h=50 Hz (France), dod-o=60 Hz (USA)
+  cohort_mains_freq_hz:
+    dod-h: 50.0
+    dod-o: 60.0
+  excluded_subjects:
+    # DOD-O recording without consensus annotation (Guillot et al., 2020)
+    - "5d8e93a5-d26a-436d-bc2c-e9527dc92cbf"
+
+cohort_filter:
+  enabled: false
+  healthy_only: false
+
+preprocessing:
+  # Union of all EEG derivations across DOD-H (12) and DOD-O (8) -> 14 canonical names
+  channels:
+    - "C3-M2"
+    - "C4-M1"
+    - "F3-M2"
+    - "F3-F4"
+    - "F3-O1"
+    - "F4-O2"
+    - "FP1-F3"
+    - "FP1-M2"
+    - "FP1-O1"
+    - "FP2-F4"
+    - "FP2-M1"
+    - "FP2-O2"
+    - "O1-M2"
+    - "O2-M1"
+  storage_dtype: "float32"
+  compressed: false
+  target_fs: 100
+  epoch_sec: 30
+  bandpass:
+    low_hz: 0.2
+    high_hz: 49.0
+    order: 5
+    zero_phase: true
+  notch:
+    enabled: true
+    freq_hz: null  # Null resolves to dataset.cohort_mains_freq_hz per cohort
+    q: 30
+  normalization: "zscore_per_recording"
+  labels:
+    Wake: 0
+    N1: 1
+    N2: 2
+    N3: 3
+    REM: 4
+  exclude_unknown_movement: true
+
+cv:
+  n_folds: 10
+  split_ratio:
+    train: 0.8
+    val: 0.1
+    test: 0.1
+  split_level: "subject"
+
+model:
+  name: "tinysleepnet"
+  use_context: true
+  seq_len: 20
+  n_classes: 5
+  dropout: 0.5
+  lstm_hidden: 128
+  conv_filters: 128
+  conv1_kernel: 50
+  conv1_stride: 6
+  conv_kernel: 8
+  pool1: 8
+  pool2: 4
+
+training:
+  optimizer: "adam"
+  lr: 0.0001
+  weight_decay: 0.001
+  batch_size: 32
+  max_epochs: 100
+  early_stopping_patience: 20
+  monitor: "val_macro_f1"
+  class_weighted_loss: "sqrt"
+  device: "auto"
+  augmentation:
+    enabled: true
+    max_shift_frac: 0.1
+    sign_flip_prob: 0.5
+  dry_run:
+    n_subjects: 4
+    epochs: 2

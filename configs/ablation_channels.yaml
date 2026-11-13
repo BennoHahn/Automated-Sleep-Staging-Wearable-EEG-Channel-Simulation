@@ -163,3 +163,125 @@ full_10_20_configs:
     description: "Row 5b: Simulated fronto-occipital headband Fp2-O2 / F4-O2 = (F4-M1) - (O2-M1) (Dreem, Guillot & Thorey 2021)"
     channels:
       - {name: Sim_F4_O2, op: diff, inputs: [F4-M1, O2-M1]}
+
+# Dreem Open Datasets (DOD-H + DOD-O): Singular EEG Channel Ablation Configurations
+# ==============================================================================
+# DOD-H (25 healthy, IRBA) + DOD-O (55 scored OSA, Stanford; excludes unscored 5d8e93a5-d26a-436d-bc2c-e9527dc92cbf) = 80 total subjects.
+# Shared EEG derivations across all 80 subjects: C3-M2, C4-M1, F3-M2, F3-F4, F3-O1, F4-O2 (6 channels).
+# DOD-H only (N=25): FP1-F3, FP1-M2, FP1-O1, FP2-F4, FP2-M1, FP2-O2 (6 channels).
+# DOD-O only (N=55): O1-M2, O2-M1 (2 channels).
+dreem_configs:
+  # --- 6 Shared Singular EEG Channels (Available in DOD-H + DOD-O, N=80) ---
+  dod_c3_m2:
+    category: psg_central
+    cohort_scope: shared
+    mastoid: true
+    description: "DOD Shared Single-EEG (N=80): Central C3-M2"
+    channels:
+      - {name: C3-M2, op: identity, inputs: [C3-M2]}
+
+  dod_c4_m1:
+    category: psg_central
+    cohort_scope: shared
+    mastoid: true
+    description: "DOD Shared Single-EEG (N=80): Central C4-M1"
+    channels:
+      - {name: C4-M1, op: identity, inputs: [C4-M1]}
+
+  dod_f3_m2:
+    category: psg_frontal
+    cohort_scope: shared
+    mastoid: true
+    description: "DOD Shared Single-EEG (N=80): Frontal F3-M2"
+    channels:
+      - {name: F3-M2, op: identity, inputs: [F3-M2]}
+
+  dod_f3_f4:
+    category: headband_bifrontal
+    cohort_scope: shared
+    mastoid: false
+    description: "DOD Shared Single-EEG (N=80): Bifrontal F3-F4 (mastoid-free headband)"
+    channels:
+      - {name: F3-F4, op: identity, inputs: [F3-F4]}
+
+  dod_f3_o1:
+    category: fronto_occipital
+    cohort_scope: shared
+    mastoid: false
+    description: "DOD Shared Single-EEG (N=80): Fronto-occipital F3-O1 (mastoid-free headband)"
+    channels:
+      - {name: F3-O1, op: identity, inputs: [F3-O1]}
+
+  dod_f4_o2:
+    category: fronto_occipital
+    cohort_scope: shared
+    mastoid: false
+    description: "DOD Shared Single-EEG (N=80): Fronto-occipital F4-O2 (mastoid-free headband)"
+    channels:
+      - {name: F4-O2, op: identity, inputs: [F4-O2]}
+
+  # --- 6 DOD-H-Only Singular EEG Channels (Healthy cohort, N=25) ---
+  dodh_fp1_f3:
+    category: forehead_anterior
+    cohort_scope: dodh_only
+    mastoid: false
+    description: "DOD-H Single-EEG (N=25): Left frontopolar-frontal FP1-F3"
+    channels:
+      - {name: FP1-F3, op: identity, inputs: [FP1-F3]}
+
+  dodh_fp1_m2:
+    category: forehead_mastoid
+    cohort_scope: dodh_only
+    mastoid: true
+    description: "DOD-H Single-EEG (N=25): Left frontopolar-mastoid FP1-M2"
+    channels:
+      - {name: FP1-M2, op: identity, inputs: [FP1-M2]}
+
+  dodh_fp1_o1:
+    category: frontopolar_occipital
+    cohort_scope: dodh_only
+    mastoid: false
+    description: "DOD-H Single-EEG (N=25): Left frontopolar-occipital FP1-O1"
+    channels:
+      - {name: FP1-O1, op: identity, inputs: [FP1-O1]}
+
+  dodh_fp2_f4:
+    category: forehead_anterior
+    cohort_scope: dodh_only
+    mastoid: false
+    description: "DOD-H Single-EEG (N=25): Right frontopolar-frontal FP2-F4"
+    channels:
+      - {name: FP2-F4, op: identity, inputs: [FP2-F4]}
+
+  dodh_fp2_m1:
+    category: forehead_mastoid
+    cohort_scope: dodh_only
+    mastoid: true
+    description: "DOD-H Single-EEG (N=25): Right frontopolar-mastoid FP2-M1"
+    channels:
+      - {name: FP2-M1, op: identity, inputs: [FP2-M1]}
+
+  dodh_fp2_o2:
+    category: frontopolar_occipital
+    cohort_scope: dodh_only
+    mastoid: false
+    description: "DOD-H Single-EEG (N=25): Right frontopolar-occipital FP2-O2"
+    channels:
+      - {name: FP2-O2, op: identity, inputs: [FP2-O2]}
+
+  # --- 2 DOD-O-Only Singular EEG Channels (OSA cohort, N=55) ---
+  dodo_o1_m2:
+    category: psg_occipital
+    cohort_scope: dodo_only
+    mastoid: true
+    description: "DOD-O Single-EEG (N=55): Left occipital O1-M2"
+    channels:
+      - {name: O1-M2, op: identity, inputs: [O1-M2]}
+
+  dodo_o2_m1:
+    category: psg_occipital
+    cohort_scope: dodo_only
+    mastoid: true
+    description: "DOD-O Single-EEG (N=55): Right occipital O2-M1"
+    channels:
+      - {name: O2-M1, op: identity, inputs: [O2-M1]}
