@@ -1,0 +1,113 @@
+nohup: ignoring input
+==============================================================================
+SHHS1 Full Pipeline Runner | Device: cuda (NVIDIA GB10)
+Configs       : ['dual_eeg']
+Context LSTM  : True (seq_len=20)
+Class Weights : sqrt | Batch Size: 32
+Max Epochs    : 100 | Early Stopping Patience: 20
+==============================================================================
+
+[Step 1] Selected 1,771 healthy SHHS1 subjects.
+  [Local SHHS1 Mirror Detected] Reading EDFs from /data/shhs/polysomnography/edfs/shhs1 with 8 parallel CPU workers!
+Error preprocessing subject shhs1-200279: /home/uclab-guest-thesis/Documents/Benno_Hahn_BT_26WS/Thesis_Benno_Hahn/Automated-Sleep-Staging-Wearable-EEG-Channel-Simulation/data/raw/edf/shhs1-200279.edf: the file is not EDF(+) or BDF(+) compliant (it contains format errors); skipping.
+  [  87/1771] shhs1-200279: PREPROCESS ERROR (/home/uclab-guest-thesis/Documents/Benno_Hahn_BT_26WS/Thesis_Benno_Hahn/Automated-Sleep-Staging-Wearable-EEG-Channel-Simulation/data/raw/edf/shhs1-200279.edf: the file is not EDF(+) or BDF(+) compliant (it contains format errors)) -> skipped.
+Error preprocessing subject shhs1-201115: /home/uclab-guest-thesis/Documents/Benno_Hahn_BT_26WS/Thesis_Benno_Hahn/Automated-Sleep-Staging-Wearable-EEG-Channel-Simulation/data/raw/edf/shhs1-201115.edf: the file is not EDF(+) or BDF(+) compliant (it contains format errors); skipping.
+  [ 372/1771] shhs1-201115: PREPROCESS ERROR (/home/uclab-guest-thesis/Documents/Benno_Hahn_BT_26WS/Thesis_Benno_Hahn/Automated-Sleep-Staging-Wearable-EEG-Channel-Simulation/data/raw/edf/shhs1-201115.edf: the file is not EDF(+) or BDF(+) compliant (it contains format errors)) -> skipped.
+Error preprocessing subject shhs1-202248: /home/uclab-guest-thesis/Documents/Benno_Hahn_BT_26WS/Thesis_Benno_Hahn/Automated-Sleep-Staging-Wearable-EEG-Channel-Simulation/data/raw/edf/shhs1-202248.edf: the file is not EDF(+) or BDF(+) compliant (it contains format errors); skipping.
+  [ 653/1771] shhs1-202248: PREPROCESS ERROR (/home/uclab-guest-thesis/Documents/Benno_Hahn_BT_26WS/Thesis_Benno_Hahn/Automated-Sleep-Staging-Wearable-EEG-Channel-Simulation/data/raw/edf/shhs1-202248.edf: the file is not EDF(+) or BDF(+) compliant (it contains format errors)) -> skipped.
+Error preprocessing subject shhs1-202308: /home/uclab-guest-thesis/Documents/Benno_Hahn_BT_26WS/Thesis_Benno_Hahn/Automated-Sleep-Staging-Wearable-EEG-Channel-Simulation/data/raw/edf/shhs1-202308.edf: the file is not EDF(+) or BDF(+) compliant (it contains format errors); skipping.
+  [ 674/1771] shhs1-202308: PREPROCESS ERROR (/home/uclab-guest-thesis/Documents/Benno_Hahn_BT_26WS/Thesis_Benno_Hahn/Automated-Sleep-Staging-Wearable-EEG-Channel-Simulation/data/raw/edf/shhs1-202308.edf: the file is not EDF(+) or BDF(+) compliant (it contains format errors)) -> skipped.
+Error preprocessing subject shhs1-204217: /home/uclab-guest-thesis/Documents/Benno_Hahn_BT_26WS/Thesis_Benno_Hahn/Automated-Sleep-Staging-Wearable-EEG-Channel-Simulation/data/raw/edf/shhs1-204217.edf: the file is not EDF(+) or BDF(+) compliant (it contains format errors); skipping.
+  [1278/1771] shhs1-204217: PREPROCESS ERROR (/home/uclab-guest-thesis/Documents/Benno_Hahn_BT_26WS/Thesis_Benno_Hahn/Automated-Sleep-Staging-Wearable-EEG-Channel-Simulation/data/raw/edf/shhs1-204217.edf: the file is not EDF(+) or BDF(+) compliant (it contains format errors)) -> skipped.
+Cohort preprocessing summary: 1766/1771 subjects ready (cached=1766, newly_processed=0, skipped=5).
+  [Cohort Channel Filter] Excluded 28/1766 subjects missing C3-A2 -> 1738 complete 4-channel subjects retained.
+[Step 1] Loaded 1,738 subjects (1,761,352 valid 30s epochs).
+
+[Step 4] Active Results Directory: /home/uclab-guest-thesis/Documents/Benno_Hahn_BT_26WS/Thesis_Benno_Hahn/Automated-Sleep-Staging-Wearable-EEG-Channel-Simulation/results/shhs1_healthy_n1738_ctxTrue_wsqrt_bs32_ep100_pat20
+
+==============================================================================
+Training Config: dual_eeg (2-ch Bilateral Central EEG (C4-A1, C3-A2))
+==============================================================================
+  [dual_eeg | Fold 00] Epoch 001/100 | loss=0.7948 | val_acc=0.732 | val_kappa=0.639 | val_macro_f1=0.668 (best=0.668 @ ep 1)
+  [dual_eeg | Fold 00] Epoch 010/100 | loss=0.4939 | val_acc=0.820 | val_kappa=0.755 | val_macro_f1=0.757 (best=0.762 @ ep 8)
+  [dual_eeg | Fold 00] Epoch 020/100 | loss=0.4616 | val_acc=0.828 | val_kappa=0.766 | val_macro_f1=0.767 (best=0.772 @ ep 17)
+  [dual_eeg | Fold 00] Epoch 030/100 | loss=0.4486 | val_acc=0.832 | val_kappa=0.770 | val_macro_f1=0.769 (best=0.777 @ ep 29)
+  [dual_eeg | Fold 00] Epoch 040/100 | loss=0.4420 | val_acc=0.843 | val_kappa=0.784 | val_macro_f1=0.780 (best=0.780 @ ep 40)
+  [dual_eeg | Fold 00] Epoch 050/100 | loss=0.4374 | val_acc=0.823 | val_kappa=0.761 | val_macro_f1=0.764 (best=0.780 @ ep 40)
+  [dual_eeg | Fold 00] Epoch 060/100 | loss=0.4339 | val_acc=0.837 | val_kappa=0.776 | val_macro_f1=0.774 (best=0.780 @ ep 40)
+  [dual_eeg | Fold 00] Early stopping triggered at epoch 60 (best epoch: 40, val_macro_f1=0.7798).
+  -> [dual_eeg | Fold 00 DONE in 6958.7s] Test 174 subjects (shhs1-200058..shhs1-205781): ACC=0.851 | Kappa=0.795 | MCC=0.796 | Macro-F1=0.789
+  [dual_eeg | Fold 01] Epoch 001/100 | loss=0.7945 | val_acc=0.759 | val_kappa=0.674 | val_macro_f1=0.695 (best=0.695 @ ep 1)
+  [dual_eeg | Fold 01] Epoch 010/100 | loss=0.4938 | val_acc=0.831 | val_kappa=0.770 | val_macro_f1=0.770 (best=0.770 @ ep 10)
+  [dual_eeg | Fold 01] Epoch 020/100 | loss=0.4579 | val_acc=0.829 | val_kappa=0.769 | val_macro_f1=0.770 (best=0.770 @ ep 10)
+  [dual_eeg | Fold 01] Epoch 030/100 | loss=0.4447 | val_acc=0.842 | val_kappa=0.782 | val_macro_f1=0.779 (best=0.779 @ ep 30)
+  [dual_eeg | Fold 01] Epoch 040/100 | loss=0.4381 | val_acc=0.826 | val_kappa=0.765 | val_macro_f1=0.769 (best=0.780 @ ep 38)
+  [dual_eeg | Fold 01] Epoch 050/100 | loss=0.4341 | val_acc=0.821 | val_kappa=0.760 | val_macro_f1=0.767 (best=0.780 @ ep 38)
+  [dual_eeg | Fold 01] Early stopping triggered at epoch 58 (best epoch: 38, val_macro_f1=0.7797).
+  -> [dual_eeg | Fold 01 DON  [dual_eeg | Fold 01] Epoch 070/100 | loss=0.4292 | val_acc=0.834 | val_kappa=0.775 | val_macro_f1=0.777 (best=0.784 @ ep 62)
+  [dual_eeg | Fold 01] Epoch 080/100 | loss=0.4282 | val_acc=0.824 | val_kappa=0.764 | val_macro_f1=0.771 (best=0.784 @ ep 62)
+  [dual_eeg | Fold 01] Epoch 090/100 | loss=0.4279 | val_acc=0.839 | val_kappa=0.780 | val_macro_f1=0.780 (best=0.784 @ ep 82)
+  [dual_eeg | Fold 01] Epoch 100/100 | loss=0.4276 | val_acc=0.827 | val_kappa=0.767 | val_macro_f1=0.771 (best=0.784 @ ep 82)
+  -> [dual_eeg | Fold 01 DONE in 11792.9s] Test 174 subjects (shhs1-200004..shhs1-205797): ACC=0.845 | Kappa=0.78  [dual_eeg | Fold 02] Epoch 040/100 | loss=0.4443 | val_acc=0.824 | val_kappa=0.764 | val_macro_f1=0.764 (best=0.773 @ ep 39)
+  [dual_eeg | Fold 02] Epoch 050/100 | loss=0.4386 | val_acc=0.828 | val_kappa=0.767 | val_macro_f1=0.767 (best=0.776 @ ep 48)
+  [dual_eeg | Fold 02] Epoch 060/100 | loss=0.4363 | val_acc=0.834 | val_kappa=0.776 | val_macro_f1=0.772 (best=0.777 @ ep 59)
+  [dual_eeg | Fold 02] Epoch 070/100 | loss=0.4355 | val_acc=0.814 | val_kappa=0.753 | val_macro_f1=0.758 (best=0.780 @ ep 67)
+  [dual_eeg | Fold 02] Epoch 080/100 | loss=0.4323 | val_acc=0.836 | val_kappa=0.776 | val_macro_f1=0.771 (best=0.780 @ ep 67)
+  [dual_eeg | Fold 02] Early   [dual_eeg | Fold 02] Epoch 050/100 | loss=0.4383 | val_acc=0.817 | val_kappa=0.754 | val_macro_f1=0.760 (best=0.779 @ ep 42)
+  [dual_eeg | Fold 02] Epoch 060/100 | loss=0.4356 | val_acc=0.833 | val_kappa=0.775 | val_macro_f1=0.772 (best=0.779 @ ep 42)
+  [dual_eeg | Fold 02] Early stopping triggered at epoch 62 (best epoch: 42, val_macro_f1=0.7785).
+  -> [dual_eeg | Fold 02 DONE in 7397.8s] Test 174 subjects (shhs1-200034..shhs1-205780): ACC=0.843 | Kappa=0.785   [dual_eeg | Fold 03] Epoch 020/100 | loss=0.4654 | val_acc=0.835 | val_kappa=0.776 | val_macro_f1=0.775 (best=0.781 @ ep 10)
+  [dual_eeg | Fold 03] Epoch 030/100 | loss=0.4524 | val_acc=0.840 | val_kappa=0.782 | val_macro_f1=0.782 (best=0.790 @ ep 22)
+  [dual_eeg | Fold 03] Epoch 040/100 | loss=0.4451 | val_acc=0.843 | val_kappa=0.786 | val_macro_f1=0.783 (best=0.790 @ ep 22)
+  [dual_eeg | Fold 03] Early  [dual_eeg | Fold 03] Epoch 030/100 | loss=0.4535 | val_acc=0.843 | val_kappa=0.787 | val_macro_f1=0.784 (best=0.789 @ ep 25)
+  [dual_eeg | Fold 03] Epoch 040/100 | loss=0.4456 | val_acc=0.848 | val_kappa=0.793 | val_macro_f1=0.786 (best=0.789 @ ep 25)
+  [dual_eeg | Fold 03] Epoch 050/100 | loss=0.4417 | val_acc=0.850 | val_kappa=0.796 | val_macro_f1=0.788 (best=0.794 @ ep 44)
+  [dual_eeg | Fold 03] Epoch 060/100 | loss=0.4378 | val_acc=0.854 | val_kappa=0.801 | val_macro_f1=0.792 (best=0.797 @ ep 58)
+  [dual_eeg | Fold 03] Epoch 070/100 | loss=0.4361 | val_acc=0.845 | val_kappa=0.791 | val_macro_f1=0.786 (best=0.797 @ ep 58)
+  [dual_eeg | Fold 03] Early stopping triggered at epoch 78 (best epoch: 58, val_macro_f1=0.7966).
+  -> [dual_eeg | Fold 03 DONE in 9250.5s] Test 174 subjects (shhs1-200001..shhs1-205785): ACC=0.846 | Kappa=0.789  [dual_eeg | Fold 04] Epoch 050/100 | loss=0.4404 | val_acc=0.846 | val_kappa=0.789 | val_macro_f1=0.783 (best=0.792 @ ep 32)
+  [dual_eeg | Fold 04] Epoch 060/100 | loss=0.4379 | val_acc=0.845 | val_kappa=0.789 | val_macro_f1=0.784 (best=0.794 @ ep 52)
+  [dual_eeg | Fold 04] Epoch 070/100 | loss=0.4360 | val_acc=0.846 | val_kappa=0.788 | val_macro_f1=0.782 (best=0.794 @ ep 52)
+  [dual_eeg | Fold 04] Early  [dual_eeg | Fold 04] Epoch 030/100 | loss=0.4534 | val_acc=0.852 | val_kappa=0.796 | val_macro_f1=0.789 (best=0.789 @ ep 30)
+  [dual_eeg | Fold 04] Epoch 040/100 | loss=0.4453 | val_acc=0.842 | val_kappa=0.785 | val_macro_f1=0.782 (best=0.790 @ ep 32)
+  [dual_eeg | Fold 04] Epoch 050/100 | loss=0.4399 | val_acc=0.843 | val_kappa=0.786 | val_macro_f1=0.782 (best=0.790 @ ep 32)
+  [dual_eeg | Fold 04] Epoch 060/100 | loss=0.4383 | val_acc=0.846 | val_kappa=0.790 | val_macro_f1=0.784 (best=0.792 @ ep 55)
+  [dual_eeg | Fold 04] Epoch 070/100 | loss=0.4366 | val_acc=0.844 | val_kappa=0.786 | val_macro_f1=0.780 (best=0.792 @ ep 55)
+  [dual_eeg | Fold 04] Early stopping triggered at epoch 75 (best epoch: 55, val_macro_f1=0.7923).
+  -> [dual_eeg | Fold 04 DONE in 8936.9s] Test 174 subjects (shhs1-200033..shhs1-205691): ACC=0.857 | Kappa=0.803 | MCC=0.804 | Macro-F1=0.794
+  [dual_eeg | Fold 05] Loaded verified saved result from fold_05.json (best_ep=29, Test ACC=0.847, Kappa=0.792, MCC=0.794, Macro-F1=0.787)
+  [dual_eeg | Fold 06] Epoch 001/100 | loss=0.7970 | val_acc=0.723 | val_kappa=0.628 | val_macro_f1=0.660 (best=0.660 @ ep 1)
+  [dual_eeg | Fold 06] Epoch 010/100 | loss=0.4962 | val_acc=0.823 | val_kappa=0.755 | val_macro_f1=0.752 (best=0.759 @ ep 7)
+  [dual_eeg | Fold 06] Epoch 020/100 | loss=0.4636 | val_acc=0.838 | val_kappa=0.778 | val_macro_f1=0.774 (best=0.774 @ ep 20)
+  [dual_eeg | Fold 06] Epoch 030/100 | loss=0.4517 | val_acc=0.831 | val_kappa=0.770 | val_macro_f1=0.768 (best=0.774 @ ep 20)
+  [dual_eeg | Fold 06] Epoch 040/100 | loss=0.4433 | val_acc=0.838 | val_kappa=0.778 | val_macro_f1=0.772 (best=0.780 @ ep 35)
+  [dual_eeg | Fold 06] Epoch 050/100 | loss=0.4387 | val_acc=0.839 | val_kappa=0.778 | val_macro_f1=0.772 (best=0.780 @ ep 35)
+  [dual_eeg | Fold 06] Early stopping triggered at epoch 55 (best epoch: 35, val_macro_f1=0.7798).
+  -> [dual_eeg | Fold 06 DONE in 6597.8s] Test 174 subjects (shhs1-200053..shhs1-205790): ACC=0.849 | Kappa=0.792 | MCC=0.793 | Macro-F1=0.781
+  [dual_eeg | Fold 07] Epoch 001/100 | loss=0.8016 | val_acc=0.756 | val_kappa=0.676 | val_macro_f1=0.693 (best=0.693 @ ep 1)
+  [dual_eeg | Fold 07] Epoch 010/100 | loss=0.4986 | val_acc=0.844 | val_kappa=0.789 | val_macro_f1=0.781 (best=0.781 @ ep 10)
+  [dual_eeg | Fold 07] Epoch 020/100 | loss=0.4654 | val_acc=0.845 | val_kappa=0.790 | val_macro_f1=0.780 (best=0.795 @ ep 19)
+  [dual_eeg | Fold 07] Epoch 030/100 | loss=0.4523 | val_acc=0.850 | val_kappa=0.797 | val_macro_f1=0.789 (best=0.795 @ ep 19)
+  [dual_eeg | Fold 07] Epoch 040/100 | loss=0.4441 | val_acc=0.867 | val_kappa=0.817 | val_macro_f1=0.800 (best=0.803 @ ep 38)
+  [dual_eeg | Fold 07] Epoch 050/100 | loss=0.4411 | val_acc=0.843 | val_kappa=0.789 | val_macro_f1=0.785 (best=0.803 @ ep 38)
+  [dual_eeg | Fold 07] Early stopping triggered at epoch 58 (best epoch: 3  [dual_eeg | Fold 07] Epoch 060/100 | loss=0.4390 | val_acc=0.846 | val_kappa=0.792 | val_macro_f1=0.784 (best=0.804 @ ep 40)
+  [dual_eeg | Fold 07] Early stopping tri  [dual_eeg | Fold 08] Epoch 001/100 | loss=0.8071 | val_acc=0.772 | val_kappa=0.679 | val_macro_f1=0.693 (best=0.693 @ ep 1)
+  [dual_eeg | Fold 08] Epoch 010/100 | loss=0.5002 | val_acc=0.825 | val_kappa=0.761 | val_macro_f1=0.759 (best=0.759 @ ep 10)
+  [dual_eeg | Fold 08] Epoch 020/100 | loss=0.4666 | val_acc=0.824 | val_kappa=0.762 | val_macro_f1=0.762 (best=0.767 @ ep 17)
+  [dual_eeg | Fold 08] Epoch 030/100 | loss=0.4527 | val_acc=0.821 | val_kappa=0.759 | val_macro_f1=0.760 (best=0.771 @ ep 23)
+  [dual_eeg | Fold 08] Epoch 040/100 | loss=0.4468 | val_acc=0.832 | val_kappa=0.771 | val_macro_f1=0.770 (best=0.771 @ ep 23)
+  [dual_eeg | Fold 08] Early stopping triggered at epoch 43 (best epoch: 23, val_macro_f1=0.7714).
+  -> [dual_eeg | Fold 08 DONE in 5112.6s] Test 173 subjects (shhs1-200044..shhs1-205663): ACC=0.856 | Kappa=0.805 | MCC=0.807 | Macro-F1=0.795
+  [dual_eeg | Fold 09] Epoch 001/100 | loss=0.7984 | val_acc=0.773 | val_kappa=0.694 | val_macro_f1=0.706 (best=0.706 @ ep 1)
+  [dual_eeg | Fold 09] Epoch 010/100 | loss=0.4929 | val_acc=0.836 | val_kappa=0.777 | val_macro_f1=0.775 (best=0.775 @ ep 10)
+  [dual_eeg | Fold 09] Epoch 020/100 | loss=0.4611 | val_acc=0.842 | val_kappa=0.784 | val_macro_f1=0.782 (best=0.782 @ ep 20)
+  [dual_eeg | Fold 09] Epoch 030/100 | loss=0.4485 | val_acc=0.850 | val_kappa=0.793 | val_macro_f1=0.787 (best=0.788 @ ep 24)
+  [dual_eeg | Fold 09] Epoch 040/100 | loss=0.4408 | val_acc=0.831 | val_kappa=0.771 | val_macro_f1=0.774 (best=0.788 @ ep 24)
+  [dual_eeg | Fold 09] Early stopping triggered at epoch 44 (best epoch: 24, val_macro_f1=0.7878).
+  -> [dual_eeg | Fold 09 DONE in 4974.2s] Test 173 subjects (shhs1-200019..shhs1-205788): ACC=0.842 | Kappa=0.782 | MCC=0.783 | Macro-F1=0.777
+
+[Step 5] Saved Summary CSV to /home/uclab-guest-thesis/Documents/Benno_Hahn_BT_26WS/Thesis_Benno_Hahn/Automated-Sleep-Staging-Wearable-EEG-Channel-Simulation/results/shhs1_healthy_n1738_ctxTrue_wsqrt_bs32_ep100_pat20/ablation_summary_10fold.csv
+  Config ACC (mean±sd) Kappa (mean±sd) MCC (mean±sd) Macro-F1 (mean±sd) Weighted-F1 (mean±sd)  Pooled_Kappa  Pooled_MCC  Pooled_Macro_F1  F1_Wake  F1_N1  F1_N2  F1_N3  F1_REM
+dual_eeg 0.848 ± 0.005   0.792 ± 0.007 0.793 ± 0.007      0.785 ± 0.006         0.852 ± 0.005        0.7919      0.7929           0.7854   0.9268 0.5009 0.8491 0.7926  0.8578
+[Step 5] Saved confusion matrix, clinical agreement CSV, hypnogram & Bland-Altman plots to /home/uclab-guest-thesis/Documents/Benno_Hahn_BT_26WS/Thesis_Benno_Hahn/Automated-Sleep-Staging-Wearable-EEG-Channel-Simulation/results/shhs1_healthy_n1738_ctxTrue_wsqrt_bs32_ep100_pat20/figures
+ation/results/shhs1_healthy_n1738_ctxTrue_wsqrt_bs32_ep100_pat20/figures

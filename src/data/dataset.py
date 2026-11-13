@@ -322,6 +322,13 @@ def load_subject_records_from_dir(
     if lazy is None:
         lazy = len(npz_files) > 50
 
-    if lazy:
-        return [load_preprocessed_subject_metadata(p) for p in npz_files]
-    return [load_preprocessed_subject(p) for p in npz_files]
+    records = (
+        [load_preprocessed_subject_metadata(p) for p in npz_files]
+        if lazy
+        else [load_preprocessed_subject(p) for p in npz_files]
+    )
+    req = {"C4-A1", "C3-A2", "EOG(L)", "EOG(R)"}
+    valid = [r for r in records if req.issubset(set(r.get("channel_names", [])))]
+    if len(valid) < len(records):
+        print(f"  [Cohort Channel Filter] Excluded {len(records) - len(valid)}/{len(records)} subjects missing C3-A2 -> {len(valid)} complete 4-channel subjects retained.", flush=True)
+    return valid

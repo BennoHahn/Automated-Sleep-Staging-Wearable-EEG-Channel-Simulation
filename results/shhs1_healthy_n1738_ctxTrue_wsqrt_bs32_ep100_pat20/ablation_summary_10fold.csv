@@ -1,0 +1,2 @@
+Config,ACC (mean±sd),Kappa (mean±sd),MCC (mean±sd),Macro-F1 (mean±sd),Weighted-F1 (mean±sd),Pooled_Kappa,Pooled_MCC,Pooled_Macro_F1,F1_Wake,F1_N1,F1_N2,F1_N3,F1_REM
+dual_eeg,0.848 ± 0.005,0.792 ± 0.007,0.793 ± 0.007,0.785 ± 0.006,0.852 ± 0.005,0.7919,0.7929,0.7854,0.9268,0.5009,0.8491,0.7926,0.8578
